@@ -1,0 +1,57 @@
+# finmes stack: Hermes Agent gateway (Q&A over the journal) + ingest endpoint
+# (phone -> journal). Fresh machine: clone, `cp .env.example .env` and fill it,
+# then `docker compose up -d --build`. Nothing else.
+
+services:
+  # One-shot: regenerates .hermes/.env from the root .env on every `up`, so the
+  # root .env stays the single secrets file (Hermes only reads its own .env).
+  hermes-env:
+    image: python:3.13-slim
+    env_file: .env
+    volumes:
+      - ./.hermes:/opt/data
+    entrypoint: /bin/sh -c
+    command:
+      - |
+        [ -n "$$OPENROUTER_API_KEY" ] || { echo "OPENROUTER_API_KEY missing from .env" >&2; exit 1; }
+        [ -n "$$API_SERVER_KEY" ] || { echo "API_SERVER_KEY missing from .env" >&2; exit 1; }
+        printf 'OPENROUTER_API_KEY=%s\nFIRECRAWL_API_KEY=%s\nAPI_SERVER_ENABLED=true\nAPI_SERVER_KEY=%s\nAPI_SERVER_HOST=0.0.0.0\n' \
+          "$$OPENROUTER_API_KEY" "$$FIRECRAWL_API_KEY" "$$API_SERVER_KEY" > /opt/data/.env
+        if [ -n "$$DISCORD_BOT_TOKEN" ]; then
+          printf 'DISCORD_BOT_TOKEN=%s\nDISCORD_ALLOWED_USERS=%s\nDISCORD_HOME_CHANNEL=%s\n' \
+            "$$DISCORD_BOT_TOKEN" "$$DISCORD_ALLOWED_USERS" "$$DISCORD_HOME_CHANNEL" >> /opt/data/.env
+        fi
+
+  hermes:
+    build: .
+    container_name: hermes
+    restart: unless-stopped
+    command: gateway run
+    depends_on:
+      hermes-env:
+        condition: service_completed_successfully
+    environment:
+      LEDGER_FILE: /opt/journal/main.journal
+    volumes:
+      - ./.hermes:/opt/data
+      - ./data/journal:/opt/journal
+    ports:
+      # Loopback only: the agent API is reached from this machine (or via
+      # Tailscale serve later), never the LAN.
+      - "127.0.0.1:8642:8642"
+
+  ingest:
+    image: python:3.13-slim
+    container_name: finmes-ingest
+    restart: unless-stopped
+    working_dir: /app
+    command: python -m finmes.server
+    env_file: .env
+    volumes:
+      # Whole repo, not single files: mappings.toml is hand-edited and editors
+      # replace the inode, which would go stale behind a single-file bind mount.
+      - .:/app
+    ports:
+      # All interfaces: the iPhone shortcut reaches this via the Mac's tailnet
+      # IP. Bearer-token auth gates it (same posture as the stub).
+      - "8643:8643"

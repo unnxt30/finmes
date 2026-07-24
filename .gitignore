@@ -1,0 +1,19 @@
+samples/
+ingest_stub.jsonl
+ingest_stub.out
+.env
+.claude/
+data/
+
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# .hermes is runtime state (secrets, sessions, trajectory db) EXCEPT the bits
+# a fresh clone needs: model config and our custom skill.
+.hermes/*
+!.hermes/config.yaml
+!.hermes/skills
+.hermes/skills/*
+!.hermes/skills/finmes-hledger
