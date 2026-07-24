@@ -196,7 +196,8 @@ Historical entries and online payments have none.
 
 - Find them: `hledger print tag:lat` (or check any entry's comment).
 - Resolve to nearby shops: `nearby <lat> <lon>` (optional radius in metres,
-  default 150). Prints up to 10 places, nearest first, plus the locality.
+  default/minimum 500, max 10000). Prints up to 10 places with full
+  addresses, nearest first.
 - Use when identifying an unknown payee: show the POI candidates alongside
   the amount/date and ASK the user — never assign a payee mapping from
   location alone.

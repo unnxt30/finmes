@@ -32,7 +32,7 @@ services:
         condition: service_completed_successfully
     environment:
       LEDGER_FILE: /opt/journal/main.journal
-      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+      MAPPLS_API_KEY: ${MAPPLS_API_KEY:-}
     volumes:
       - ./.hermes:/opt/data
       - ./data/journal:/opt/journal
