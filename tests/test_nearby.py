@@ -34,6 +34,13 @@ def test_format_places_handles_missing_type():
     assert lines[0].startswith("X — ? — ")
 
 
+def test_main_with_non_numeric_args_exits_cleanly(monkeypatch, capsys):
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "dummy")
+    rc = nearby.main(["abc", "77.45"])
+    assert rc == 2
+    assert "numeric" in capsys.readouterr().err
+
+
 def test_main_without_api_key_exits_nonzero(monkeypatch, capsys):
     monkeypatch.delenv("GOOGLE_MAPS_API_KEY", raising=False)
     rc = nearby.main(["28.65", "77.45"])

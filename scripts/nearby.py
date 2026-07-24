@@ -73,8 +73,12 @@ def main(argv: list[str] | None = None) -> int:
     if not key:
         print("GOOGLE_MAPS_API_KEY is not set", file=sys.stderr)
         return 2
-    lat, lon = float(args[0]), float(args[1])
-    radius = min(float(args[2]) if len(args) == 3 else 150.0, 1000.0)
+    try:
+        lat, lon = float(args[0]), float(args[1])
+        radius = min(float(args[2]) if len(args) == 3 else 150.0, 1000.0)
+    except ValueError:
+        print("lat, lon, and radius must be numeric", file=sys.stderr)
+        return 2
     try:
         lines = format_places(search_places(lat, lon, radius, key), lat, lon)
     except Exception as e:  # urllib errors, bad JSON — report, never guess
