@@ -10,3 +10,7 @@ RUN curl -sL "https://github.com/simonmichael/hledger/releases/download/${HLEDGE
 
 # hledger (GHC) needs a UTF-8 locale to read the ₹ symbol in the journal.
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+
+# Agent-callable POI lookup for journal lat:/lon: tags.
+COPY scripts/nearby.py /usr/local/bin/nearby
+RUN chmod +x /usr/local/bin/nearby
