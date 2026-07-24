@@ -140,6 +140,9 @@ hledger manual: question→command recipes, query syntax, and guardrails
 in `.hermes/state.db` (`auto_prune: false`) as a future fine-tuning corpus —
 hledger gives verifiable ground truth for filtering traces.
 
+Entries ingested from the phone carry `lat:`/`lon:` tags; the `nearby` tool
+in the agent container resolves them to surrounding POIs during payee review.
+
 Roadmap: cron digests (weekly + month-end), payee review loop (batch-ask
 unknowns, write mappings), threshold alerts, subscription/autopay audit,
 budget reports, and deterministic `finmes reconcile` against monthly bank

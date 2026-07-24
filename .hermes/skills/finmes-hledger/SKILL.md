@@ -189,3 +189,17 @@ Commands: `bal`/`balance`, `reg`/`register`, `aregister`, `print`, `bs`, `is`,
   the empty result, then adjust the query. Never substitute a guess for output you
   don't have.
 
+## Payment locations
+
+Entries ingested from the phone carry `lat:`/`lon:` tags (payment-time GPS).
+Historical entries and online payments have none.
+
+- Find them: `hledger print tag:lat` (or check any entry's comment).
+- Resolve to nearby shops: `nearby <lat> <lon>` (optional radius in metres,
+  default 150). Prints up to 10 places, nearest first, plus the locality.
+- Use when identifying an unknown payee: show the POI candidates alongside
+  the amount/date and ASK the user — never assign a payee mapping from
+  location alone.
+- If `nearby` fails or an entry has no tags, say so plainly. Do not guess
+  merchants from coordinates.
+

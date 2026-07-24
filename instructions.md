@@ -122,6 +122,8 @@ Agent runs with tool calls take a while (30s+); that's normal.
 | Run hledger directly | `docker exec hermes hledger -f /opt/journal/main.journal balance` |
 | Backfill SMS corpus into the journal | `.venv/bin/finmes backfill` (idempotent; re-run any time) |
 | Export agent traces (training corpus) | `docker exec hermes hermes sessions export --format jsonl - --yes > traces/$(date +%Y%m%d).jsonl` |
+| Replay raw ingest log into the journal | `.venv/bin/finmes replay` (idempotent) |
+| Look up a payment location | `docker exec hermes nearby <lat> <lon>` |
 
 ## Agent traces
 
