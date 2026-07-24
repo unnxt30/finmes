@@ -90,7 +90,20 @@ def _fmt_amount(txn: Txn) -> str:
     return f"₹{amt}" if txn.currency == "INR" else f"{amt} {txn.currency}"
 
 
-def render_entry(txn: Txn, sender: str, mappings: Mappings) -> str:
+def _location_tags(location) -> str:
+    """', lat:X, lon:Y' rendered into the tag comment, or ''. The iOS shortcut
+    sends lat/lon as strings; coerce and round to 5 decimals (~1 m)."""
+    if not location:
+        return ""
+    try:
+        lat = round(float(location["lat"]), 5)
+        lon = round(float(location["lon"]), 5)
+    except (KeyError, TypeError, ValueError):
+        return ""
+    return f", lat:{lat}, lon:{lon}"
+
+
+def render_entry(txn: Txn, sender: str, mappings: Mappings, location=None) -> str:
     """One hledger entry. The amount sits on the account money flowed INTO:
     the category account for debits, the bank/card account for credits."""
     payee = txn.counterparty or synthesize_payee(txn)
@@ -99,6 +112,7 @@ def render_entry(txn: Txn, sender: str, mappings: Mappings) -> str:
     tags = f"key:{dedup_key(txn)}"
     if txn.ref:
         tags += f", ref:{txn.ref}"
+    tags += _location_tags(location)
     amount = _fmt_amount(txn)
     if txn.direction == "debit":
         first, second = f"{target}  {amount}", source
@@ -131,17 +145,17 @@ class Summary:
 
 
 def ingest(
-    records: Iterable[tuple[str, str, date]],
+    records: Iterable[tuple[str, str, date, dict | None]],
     journal_dir: Path,
     mappings: Mappings,
 ) -> Summary:
-    """Parse (sender, body, received) records and append new entries to
-    <year>.journal files. Idempotent: entries whose dedup key is already in
+    """Parse (sender, body, received, location) records and append new entries
+    to <year>.journal files. Idempotent: entries whose dedup key is already in
     the journal (or earlier in the same batch) are skipped."""
     journal_dir = Path(journal_dir)
     seen = existing_keys(journal_dir)
     summary = Summary()
-    for sender, body, received in records:
+    for sender, body, received, location in records:
         txn = parse(sender, body, received=received)
         if txn is None:
             summary.unparsed += 1
@@ -158,7 +172,7 @@ def ingest(
         with year_file.open("a") as f:
             if year_file.stat().st_size:
                 f.write("\n")
-            f.write(render_entry(txn, sender, mappings))
+            f.write(render_entry(txn, sender, mappings, location=location))
         summary.added += 1
     return summary
 

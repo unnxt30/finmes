@@ -124,6 +124,24 @@ class TestHandle:
         with pytest.raises((KeyError, ValueError, TypeError)):
             handle({"sender": "ios"}, journal_dir, mappings, log)
 
+    def test_parsed_entry_gets_location_tags(self, env):
+        journal_dir, mappings, log = env
+        handle(payload(), journal_dir, mappings, log)
+        entry = (journal_dir / "2026.journal").read_text()
+        assert "lat:28.65359, lon:77.44984" in entry
+
+    def test_jsonl_record_carries_dedup_key(self, env):
+        journal_dir, mappings, log = env
+        handle(payload(), journal_dir, mappings, log)
+        rec = json.loads(log.read_text())
+        assert rec["key"] == "203007126186.XX973.debit"
+
+    def test_skipped_record_has_no_key(self, env):
+        journal_dir, mappings, log = env
+        handle(payload(text="OTP is 123456 for txn of Rs 500 at Amazon"),
+               journal_dir, mappings, log)
+        assert "key" not in json.loads(log.read_text())
+
 
 class TestHTTP:
     @pytest.fixture

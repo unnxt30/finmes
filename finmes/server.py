@@ -55,11 +55,14 @@ def handle(payload: dict, journal_dir: Path, mappings: Mappings, log_path: Path)
     # Raw log first: if the journal append fails, the SMS is still replayable.
     record = {"at": datetime.now().isoformat(), "payload": payload, "status": status,
               "duplicate": duplicate}
+    if txn:
+        record["key"] = dedup_key(txn)
     with Path(log_path).open("a") as f:
         f.write(json.dumps(record) + "\n")
 
     if txn and not duplicate:
-        journal_ingest([(sender, text, received)], journal_dir, mappings)
+        journal_ingest([(sender, text, received, payload.get("location"))],
+                       journal_dir, mappings)
 
     return {"status": status, "summary": summary, "duplicate": duplicate}
 

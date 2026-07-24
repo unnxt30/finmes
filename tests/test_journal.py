@@ -160,10 +160,10 @@ class TestSynthesizePayee:
         assert "    liabilities:sbi-card  ₹165.00\n" in entry
 
 
-SMS_ZEPTO = ("ICICIT-S(x)", "ICICI Bank Acct XX973 debited for Rs 165.00 on 29-Jun-26; ZEPTOMARKETPLAC credited. UPI:203007126186.", date(2026, 6, 29))
+SMS_ZEPTO = ("ICICIT-S(x)", "ICICI Bank Acct XX973 debited for Rs 165.00 on 29-Jun-26; ZEPTOMARKETPLAC credited. UPI:203007126186.", date(2026, 6, 29), None)
 # Real corpus case: one self-transfer, two SMS sharing ref 642322423846.
-SMS_XFER_DEBIT = ("SBIUPI-S(x)", "Dear UPI user A/C X1583 debited by 7000.00 on date 26Feb26 trf to UNNAT SHARMA Refno 642322423846", date(2026, 2, 26))
-SMS_XFER_CREDIT = ("ICICIT-S(x)", "Dear Customer, Acct XX973 is credited with Rs 7000.00 on 26-Feb-26 from Unnat Sharma. UPI:642322423846", date(2026, 2, 26))
+SMS_XFER_DEBIT = ("SBIUPI-S(x)", "Dear UPI user A/C X1583 debited by 7000.00 on date 26Feb26 trf to UNNAT SHARMA Refno 642322423846", date(2026, 2, 26), None)
+SMS_XFER_CREDIT = ("ICICIT-S(x)", "Dear Customer, Acct XX973 is credited with Rs 7000.00 on 26-Feb-26 from Unnat Sharma. UPI:642322423846", date(2026, 2, 26), None)
 
 
 class TestIngest:
@@ -204,8 +204,8 @@ class TestIngest:
 
     def test_unparsed_and_skipped_counted_not_written(self, tmp_path):
         m = Mappings.loads(MAPPINGS_TOML)
-        summary = ingest([("ICICIT-S(x)", "OTP is 123456 for txn", date(2026, 1, 1)),
-                          ("AMZNIN-S(x)", "Your order has shipped", date(2026, 1, 1))], tmp_path, m)
+        summary = ingest([("ICICIT-S(x)", "OTP is 123456 for txn", date(2026, 1, 1), None),
+                          ("AMZNIN-S(x)", "Your order has shipped", date(2026, 1, 1), None)], tmp_path, m)
         assert summary.added == 0
         assert summary.unparsed == 2
         assert not list(tmp_path.glob("*.journal"))
@@ -230,6 +230,31 @@ class TestCli:
         assert "added: 1" in out
         assert "ZEPTOMARKETPLAC" in out  # unknown payee listed for review
         assert "ZEPTOMARKETPLAC" in (jdir / "2026.journal").read_text()
+
+
+class TestLocationTags:
+    def test_render_entry_appends_lat_lon_tags(self):
+        m = Mappings.loads(MAPPINGS_TOML)
+        entry = render_entry(txn(), "ios", m, location={"lat": "28.65358897706612", "lon": "77.44984089225419"})
+        assert "lat:28.65359" in entry
+        assert "lon:77.44984" in entry
+
+    def test_render_entry_without_location_has_no_tags(self):
+        m = Mappings.loads(MAPPINGS_TOML)
+        entry = render_entry(txn(), "ios", m)
+        assert "lat:" not in entry
+
+    def test_render_entry_tolerates_malformed_location(self):
+        m = Mappings.loads(MAPPINGS_TOML)
+        entry = render_entry(txn(), "ios", m, location={"lat": "not-a-number"})
+        assert "lat:" not in entry
+
+    def test_ingest_threads_location_to_entry(self, tmp_path):
+        m = Mappings.loads(MAPPINGS_TOML)
+        raw = ("ICICI Bank Acct XX973 debited for Rs 165.00 on 29-Jun-26; "
+               "ZEPTOMARKETPLAC credited. UPI:203007126186.")
+        ingest([("ios", raw, date(2026, 6, 29), {"lat": "28.6", "lon": "77.2"})], tmp_path, m)
+        assert "lat:28.6, lon:77.2" in (tmp_path / "2026.journal").read_text()
 
 
 class TestDedupKey:

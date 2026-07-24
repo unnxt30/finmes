@@ -11,7 +11,7 @@ def _read_corpus(path: Path):
     """Yield (sender, body, received) from the TSV corpus: <ts>\\t<sender>\\t<body>."""
     for line in path.read_text().splitlines():
         ts, sender, body = line.split("\t", 2)
-        yield sender, body, date.fromisoformat(ts[:10])
+        yield sender, body, date.fromisoformat(ts[:10]), None
 
 
 def main(argv: list[str] | None = None) -> int:
