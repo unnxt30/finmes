@@ -136,7 +136,7 @@ Hermes Agent runs in the same container as hledger with a
 [skill file](.hermes/skills/finmes-hledger/SKILL.md) distilled from the
 hledger manual: question→command recipes, query syntax, and guardrails
 (journal is read-only to the agent; never fabricate numbers). Model:
-`moonshotai/kimi-k2-thinking` via OpenRouter. Every trajectory is persisted
+`z-ai/glm-5.3-flash` via OpenRouter. Every trajectory is persisted
 in `.hermes/state.db` (`auto_prune: false`) as a future fine-tuning corpus —
 hledger gives verifiable ground truth for filtering traces.
 

@@ -1,5 +1,5 @@
 model:
-  default: moonshotai/kimi-k2-thinking
+  default: z-ai/glm-5.3-flash
   provider: openrouter
   base_url: https://openrouter.ai/api/v1
   api_mode: chat_completions
