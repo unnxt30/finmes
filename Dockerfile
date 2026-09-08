@@ -14,3 +14,7 @@ ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 # Agent-callable POI lookup for journal lat:/lon: tags.
 COPY scripts/nearby.py /usr/local/bin/nearby
 RUN chmod +x /usr/local/bin/nearby
+
+COPY pyproject.toml /app/
+COPY finmes/ /app/finmes/
+RUN pip install --no-cache-dir /app

@@ -17,10 +17,6 @@ services:
         [ -n "$$API_SERVER_KEY" ] || { echo "API_SERVER_KEY missing from .env" >&2; exit 1; }
         printf 'OPENROUTER_API_KEY=%s\nFIRECRAWL_API_KEY=%s\nAPI_SERVER_ENABLED=true\nAPI_SERVER_KEY=%s\nAPI_SERVER_HOST=0.0.0.0\n' \
           "$$OPENROUTER_API_KEY" "$$FIRECRAWL_API_KEY" "$$API_SERVER_KEY" > /opt/data/.env
-        if [ -n "$$DISCORD_BOT_TOKEN" ]; then
-          printf 'DISCORD_BOT_TOKEN=%s\nDISCORD_ALLOWED_USERS=%s\nDISCORD_HOME_CHANNEL=%s\n' \
-            "$$DISCORD_BOT_TOKEN" "$$DISCORD_ALLOWED_USERS" "$$DISCORD_HOME_CHANNEL" >> /opt/data/.env
-        fi
 
   hermes:
     build: .
@@ -56,3 +52,18 @@ services:
       # All interfaces: the iPhone shortcut reaches this via the Mac's tailnet
       # IP. Bearer-token auth gates it (same posture as the stub).
       - "8643:8643"
+
+  discord-bot:
+    build: .
+    container_name: finmes-discord-bot
+    restart: unless-stopped
+    working_dir: /app
+    command: python -m finmes.discord_bot
+    env_file: .env
+    depends_on:
+      - hermes
+    environment:
+      LEDGER_FILE: /opt/journal/main.journal
+    volumes:
+      - .:/app
+      - ./data/journal:/opt/journal

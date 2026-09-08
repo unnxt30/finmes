@@ -3,6 +3,9 @@ name = "finmes"
 version = "0.1.0"
 description = "SMS -> hledger personal finance pipeline"
 requires-python = ">=3.11"
+dependencies = [
+    "discord.py>=2.5,<3",
+]
 
 [project.scripts]
 finmes = "finmes.cli:main"
