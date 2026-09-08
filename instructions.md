@@ -10,7 +10,7 @@ Same layout on the dev Mac and the always-on MacBook Air.
 1. Docker Desktop running.
 2. `cp .env.example .env` and fill it in. The OpenRouter key must be an
    **inference** key (openrouter.ai → Keys) — provisioning/management keys
-   can't do inference and fail with `401 User not found`.
+   cannot do inference and fail with `401 User not found`.
 3. Clone the private data repo into `data/`:
 
    ```sh
@@ -20,10 +20,10 @@ Same layout on the dev Mac and the always-on MacBook Air.
    docker compose up -d --build
    ```
 
-That's everything. The one-shot `hermes-env` service regenerates
+That is everything. The one-shot `hermes-env` service regenerates
 `.hermes/.env` from the root `.env` on every `up`, so the root `.env` is the
 single secrets file. Hermes model/provider config (`.hermes/config.yaml`) and
-the finmes-hledger skill are tracked in git; the rest of `.hermes/` (sessions,
+the finmes-hledger skill are tracked in git. The rest of `.hermes/` (sessions,
 trajectory db, caches) is runtime state that regenerates.
 
 Health checks:
@@ -50,24 +50,68 @@ finmes/
 ├── finmes/parser.py    # SMS → structured transaction parser
 ├── finmes/journal.py   # Txn → hledger entries (dedup, mapping, rendering)
 ├── finmes/server.py    # POST /ingest — phone sends every SMS, all filtering here
+├── finmes/discord_bot.py  # Discord service — commands, digests, payee review
 ├── finmes/cli.py       # `finmes backfill <corpus.tsv>`
 └── scripts/            # extraction / corpus tooling
 ```
 
 ## Discord (optional)
 
-Chat with the agent from Discord; cron digests land in a channel. One-time:
+The stack runs a dedicated `discord-bot` compose service. It reads the journal,
+calls Hermes for natural-language Q&A, and posts scheduled digests. Hermes does
+not start a Discord adapter.
 
-1. discord.com/developers → New Application → Bot tab → enable **Message
-   Content Intent** → copy the bot token.
-2. OAuth2 → URL Generator → scope `bot`, permissions Send Messages + Read
-   Message History → open the URL and invite the bot to a private server.
-3. In Discord settings enable Developer Mode, then right-click to Copy ID:
-   your user ID (`DISCORD_ALLOWED_USERS`) and the digest channel
-   (`DISCORD_HOME_CHANNEL`).
-4. Fill the three `DISCORD_*` vars in `.env`, then `docker compose up -d`.
-   The gateway starts the Discord adapter automatically when the token is
-   present; only allowed users get responses.
+### One-time setup
+
+1. At discord.com/developers, create an application. On the Bot tab, enable
+   **Message Content Intent** and copy the bot token.
+2. On OAuth2 → URL Generator, select scopes `bot` and `applications.commands`.
+   Grant Send Messages and Read Message History. Open the URL and invite the
+   bot to a private server.
+3. In Discord, enable Developer Mode. Right-click your user name and the digest
+   channel to copy their IDs.
+4. Set these variables in `.env`:
+   - `DISCORD_BOT_TOKEN` — bot token from step 1
+   - `DISCORD_ALLOWED_USERS` — comma-separated Discord user IDs allowed to use
+     the bot (commands, buttons, and Q&A)
+   - `DISCORD_HOME_CHANNEL` — channel ID where scheduled digests are posted
+5. Run `docker compose up -d`. The `discord-bot` service starts when the token
+   is set.
+
+### Slash commands
+
+| Command | Purpose |
+|---|---|
+| `/spend` | Category spending totals for a period |
+| `/recent` | Latest expense transactions |
+| `/search` | Find transactions by description |
+| `/digest` | On-demand spending digest for a period |
+| `/review` | Interactive cards for unmapped payees |
+
+### Natural-language Q&A
+
+Authorized users can ask finance questions in two ways:
+
+- Send a direct message to the bot (full message text goes to Hermes).
+- Mention the bot in a guild channel (text after the mention goes to Hermes).
+
+### Scheduled digests
+
+The bot posts to `DISCORD_HOME_CHANNEL`:
+
+- **Weekly** — every Monday at 08:00 IST (`lastweek` category and payee totals)
+- **Month-end** — on the 1st of each month at 08:00 IST (`lastmonth` totals)
+
+Each digest lists category spending, top payees, and the unknown-payee count.
+When unknown payees exist, the message includes a **Review Unmapped** button
+that opens the same interactive review flow as `/review`.
+
+### Payee mapping workflow
+
+Unknown debit payees land in `expenses:unknown` until mapped. Use `/review` or
+the digest button to assign a category. Each mapping writes to `mappings.toml`
+and triggers a journal rebuild that replaces only the derived `YYYY.journal`
+files from the raw ingest log. Historical entries update to the new account.
 
 ## Ingest endpoint
 
@@ -90,7 +134,7 @@ docker exec -it hermes hermes
 Opens the Hermes CLI inside the running container, sharing the same config
 and memory. Try:
 
-> How much did I spend this month, and what's my bank balance?
+> How much did I spend this month, and what is my bank balance?
 
 (The journal location comes from `LEDGER_FILE`; the finmes-hledger skill
 tells the agent to never pass `-f`.)
@@ -109,7 +153,7 @@ curl -s http://localhost:8642/v1/chat/completions \
        "content": "Using hledger: what did I spend in June 2026, by category?"}]}'
 ```
 
-Agent runs with tool calls take a while (30s+); that's normal.
+Agent runs with tool calls take a while (30s+). That is normal.
 
 ## Everyday operations
 
@@ -130,7 +174,7 @@ Agent runs with tool calls take a while (30s+); that's normal.
 Every Hermes session (system prompt, messages, tool calls, terminal outputs,
 final answers, token/cost stats) is persisted in `.hermes/state.db` and kept
 forever — `sessions.auto_prune: false` is pinned in `.hermes/config.yaml` so
-an upstream default change can't silently delete it. This is the training
+an upstream default change cannot silently delete it. This is the training
 corpus for a possible future fine-tuned local model, and the eval set for
 trying cheaper hosted models. Context compaction only soft-archives rows
 (`active=0, compacted=1`); originals stay on disk.

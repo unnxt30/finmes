@@ -29,9 +29,12 @@ flowchart LR
         G -->|parsed, new| H[["journal/*.journal<br/>dedup via key: tags"]]
         G -->|unparsed| R["review queue<br/>expenses:unknown"]
         H --> I[hledger]
-        I --- J["Hermes Agent<br/>gateway :8642"]
+    I --- J["Hermes Agent<br/>gateway :8642"]
     end
-    J <-->|chat + cron digests| K[Discord]
+    J <-->|chat Q&A| K[Discord]
+    L["discord-bot service"] --> K
+    L --> I
+    L --> H
 ```
 
 Key properties:
@@ -123,6 +126,7 @@ docker-compose.yml   the whole stack; .env is the single secrets file
 finmes/parser.py     SMS → structured Txn (regex per bank template)
 finmes/journal.py    Txn → hledger entry (mapping, dedup, rendering)
 finmes/server.py     POST /ingest — logging gate, raw log, journal append
+finmes/discord_bot.py  Discord service — slash commands, digests, payee review
 finmes/cli.py        `finmes backfill` — replay an SMS corpus, idempotent
 data/                private finmes-data clone: journal/, mappings.toml, ingest.jsonl
 .hermes/             agent state; only config.yaml + the finmes skill tracked
@@ -143,8 +147,11 @@ hledger gives verifiable ground truth for filtering traces.
 Entries ingested from the phone carry `lat:`/`lon:` tags; the `nearby` tool
 in the agent container resolves them to surrounding POIs during payee review.
 
-Roadmap: cron digests (weekly + month-end), payee review loop (batch-ask
-unknowns, write mappings), threshold alerts, subscription/autopay audit,
-budget reports, and deterministic `finmes reconcile` against monthly bank
-statements (backfills missed SMS, catches non-SMS items like interest and
-charges, asserts balances).
+The `discord-bot` compose service posts weekly and month-end spending digests
+to a home channel, exposes `/spend`, `/recent`, `/search`, `/digest`, and
+`/review` slash commands, and routes natural-language questions to Hermes.
+See [instructions.md](instructions.md) for setup.
+
+Roadmap: threshold alerts, subscription/autopay audit, budget reports, and
+deterministic `finmes reconcile` against monthly bank statements (backfills
+missed SMS, catches non-SMS items like interest and charges, asserts balances).
