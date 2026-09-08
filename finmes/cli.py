@@ -1,11 +1,10 @@
 """finmes CLI: backfill, replay. Later: summary, unknowns, reconcile."""
 
 import argparse
-import json
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
-from finmes.journal import Mappings, ingest
+from finmes.journal import Mappings, ingest, read_ingest_log
 
 
 def _read_corpus(path: Path):
@@ -13,20 +12,6 @@ def _read_corpus(path: Path):
     for line in path.read_text().splitlines():
         ts, sender, body = line.split("\t", 2)
         yield sender, body, date.fromisoformat(ts[:10]), None
-
-
-def _read_ingest_log(path: Path):
-    """Yield (sender, body, received, location) from the raw JSONL ingest log.
-    Every logged payload goes back through parse() — replay decides, not the
-    logged status (the parser may have improved since the message arrived)."""
-    for line in path.read_text().splitlines():
-        rec = json.loads(line)
-        p = rec.get("payload", rec)
-        if p.get("received_at"):
-            received = datetime.fromisoformat(p["received_at"]).date()
-        else:
-            received = datetime.fromisoformat(rec["at"]).date()
-        yield p["sender"], p["text"], received, p.get("location")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
 
     mappings = Mappings.load(args.mappings)
     records = (_read_corpus(args.corpus) if args.command == "backfill"
-               else _read_ingest_log(args.log))
+               else read_ingest_log(args.log))
     summary = ingest(records, args.journal_dir, mappings)
     print(f"added: {summary.added}  duplicate: {summary.duplicate}  unparsed/skipped: {summary.unparsed}")
     if summary.unknown_payees:

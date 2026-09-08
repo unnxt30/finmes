@@ -1,12 +1,30 @@
 """Tests for the journal generator: Txn -> hledger entries."""
 
+import json
 from datetime import date
 from decimal import Decimal
 from typing import Any
 
 from finmes.cli import main as cli_main
-from finmes.journal import Mappings, dedup_key, existing_keys, ingest, render_entry, synthesize_payee
+from finmes.journal import (
+    Mappings,
+    dedup_key,
+    existing_keys,
+    ingest,
+    rebuild_journal,
+    render_entry,
+    synthesize_payee,
+    upsert_mapping,
+)
 from finmes.parser import Txn
+
+RAW = ("ICICI Bank Acct XX973 debited for Rs 1000.00 on 22-Jul-26; SANTUSHTI "
+       "credited. UPI:163451439277. Call 18002662 for dispute.")
+MAPPINGS = '[accounts]\nXX973 = "assets:bank:icici"\n'
+
+
+def _write_log(path, records):
+    path.write_text("".join(json.dumps(r) + "\n" for r in records))
 
 
 def txn(**kw: Any) -> Txn:
@@ -272,3 +290,23 @@ class TestDedupKey:
 
     def test_missing_account_uses_placeholder(self):
         assert dedup_key(txn(account=None)).split(".")[1] == "na"
+
+
+def test_upsert_mapping_adds_quoted_payee_to_payees_table(tmp_path):
+    path = tmp_path / "mappings.toml"
+    path.write_text('[payees]\nBlinkit = "expenses:groceries"\n')
+    upsert_mapping(path, "payees", "ZEPTOMARKETPLAC", "expenses:food:groceries")
+    assert Mappings.load(path).payees["ZEPTOMARKETPLAC"] == "expenses:food:groceries"
+
+
+def test_rebuild_replaces_old_derived_year_entry(tmp_path):
+    journal = tmp_path / "journal"
+    journal.mkdir()
+    (journal / "2026.journal").write_text("obsolete derived data\n")
+    log = tmp_path / "ingest.jsonl"
+    _write_log(log, [{"at": "2026-07-22T16:35:00", "payload": {"text": RAW, "sender": "ios"}}])
+    mappings = Mappings.loads(MAPPINGS + '\n[payees]\nSANTUSHTI = "expenses:food"\n')
+    rebuild_journal(log, journal, mappings)
+    entry = (journal / "2026.journal").read_text()
+    assert "obsolete derived data" not in entry
+    assert "expenses:food" in entry

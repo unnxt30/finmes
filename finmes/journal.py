@@ -5,11 +5,13 @@ SMS + the mapping table. Dedup state lives in the journal itself as key: tags.
 """
 
 import hashlib
+import json
 import re
+import tempfile
 import tomllib
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -63,6 +65,68 @@ class Mappings:
         if payee in self.payees:
             return self.payees[payee]
         return "expenses:unknown" if direction == "debit" else "income:unknown"
+
+
+def upsert_mapping(path: Path, table: str, key: str, account: str) -> None:
+    if table not in {"payees", "markers"}:
+        raise ValueError(f"unsupported mapping table: {table}")
+    if not key or not account:
+        raise ValueError("key and account must be non-empty")
+
+    quoted_key = json.dumps(key)
+    quoted_account = json.dumps(account)
+    new_line = f"{quoted_key} = {quoted_account}"
+
+    text = path.read_text() if path.exists() else ""
+    section_re = re.compile(rf"^\[{re.escape(table)}\]\s*$", re.MULTILINE)
+    match = section_re.search(text)
+
+    if not match:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        text += f"\n[{table}]\n{new_line}\n"
+        path.write_text(text)
+        return
+
+    start = match.end()
+    next_section = re.search(r"^\[", text[start:], re.MULTILINE)
+    end = start + next_section.start() if next_section else len(text)
+    section_text = text[start:end]
+
+    key_re = re.compile(rf"^{re.escape(quoted_key)}\s*=", re.MULTILINE)
+    key_match = key_re.search(section_text)
+    if key_match:
+        line_end = section_text.find("\n", key_match.start())
+        if line_end == -1:
+            line_end = len(section_text)
+        section_text = (
+            section_text[:key_match.start()]
+            + new_line
+            + section_text[line_end:]
+        )
+    else:
+        if section_text and not section_text.endswith("\n"):
+            section_text += "\n"
+        section_text += new_line + "\n"
+
+    path.write_text(text[:start] + section_text + text[end:])
+
+
+def read_ingest_log(path: Path):
+    """Yield (sender, body, received, location) from the raw JSONL ingest log.
+    Every logged payload goes back through parse() — replay decides, not the
+    logged status (the parser may have improved since the message arrived)."""
+    for line in path.read_text().splitlines():
+        rec = json.loads(line)
+        p = rec.get("payload", rec)
+        if p.get("received_at"):
+            received = datetime.fromisoformat(p["received_at"]).date()
+        else:
+            received = datetime.fromisoformat(rec["at"]).date()
+        yield p["sender"], p["text"], received, p.get("location")
+
+
+_YEAR_JOURNAL_RE = re.compile(r"^\d{4}\.journal$")
 
 
 # Deterministic descriptions for SMS that name no counterparty (card payment
@@ -174,6 +238,20 @@ def ingest(
                 f.write("\n")
             f.write(render_entry(txn, sender, mappings, location=location))
         summary.added += 1
+    return summary
+
+
+def rebuild_journal(log_path: Path, journal_dir: Path, mappings: Mappings) -> Summary:
+    journal_dir = Path(journal_dir)
+    with tempfile.TemporaryDirectory(dir=journal_dir.parent) as temp:
+        rebuilt = Path(temp)
+        summary = ingest(read_ingest_log(log_path), rebuilt, mappings)
+        for path in journal_dir.glob("*.journal"):
+            if _YEAR_JOURNAL_RE.match(path.name):
+                path.unlink()
+        for path in rebuilt.glob("*.journal"):
+            if _YEAR_JOURNAL_RE.match(path.name):
+                path.replace(journal_dir / path.name)
     return summary
 
 
