@@ -133,8 +133,9 @@ Normal ingestion comes directly from the iPhone Shortcut and needs no Mac.
    bot, for example `@finmes What is my latest transaction?`. In a direct message,
    ask the question without a mention. Only IDs in `DISCORD_ALLOWED_USERS` work.
 2. In a server channel where the bot is installed, type `/review` and select the
-   **finmes** command. The review response is visible only to you. This requests
-   a suggestion for an unknown payee; you do not need to call the API yourself.
+   **finmes** command. It walks through currently pending payees one at a time.
+   Use `/review count:10` to limit the session to 10 payees (allowed range 1–50).
+   The review response is visible only to you; no direct API call is needed.
 3. Inspect **Category to confirm**, **AI confidence**, **Nearby possibilities**
    when present, and **Suggestion context**. “Suggested by Decisions” means the
    provider returned a suggestion. An insufficient-evidence result is valid;
@@ -146,7 +147,17 @@ Normal ingestion comes directly from the iPhone Shortcut and needs no Mac.
    request another suggestion, or **Dismiss** to close without saving. To reopen
    a dismissed unknown payee, use `/review` with its exact `payee` option.
 
-Run `/review` again for the next payee after confirming or dismissing. A payee
+Confirming or dismissing automatically loads the next payee in the same card,
+with progress such as “2 of 10.” The session stops at its limit or when its
+initial queue is exhausted. You can leave at any point; unreviewed payees remain
+pending. Selecting or refreshing a category does not advance the session.
+An exact `payee` argument limits the session to that payee.
+
+Custom categories become dropdown presets after confirmation, including on future
+reviews and after restarts. If choices fill the dropdown, **More categories** and
+**Previous categories** let you browse every preset.
+
+A payee
 with no location is still reviewable, but cannot exercise Mappls. Mac recap
 messages do not contain the original phone GPS. Existing explicitly mapped
 payees and entries already covered by the commuting rule are not in this queue.
@@ -174,8 +185,9 @@ Discord supports a Mappls + OpenAI Decisions review flow. Add a direct
 The Discord frontend sends normal questions to Hermes and handles `/review`
 and category confirmation buttons itself; Hermes's journal mount stays read-only.
 
-- Use `/review` to see one unknown payee at a time, newest first. Optionally
-  supply an exact payee name to reopen a dismissed review.
+- Use `/review` to work through pending unknown payees, newest first, or
+  `/review count:10` to review up to 10. Confirming or dismissing advances to the
+  next card. Optionally supply an exact payee name to reopen a dismissed review.
 - GPS-tagged examples get nearby Mappls candidates (cached for 24 hours).
   Without GPS, the suggestion uses the payee and transaction context.
 - Decisions selects from a fixed set of category accounts or says unknown.
@@ -183,7 +195,8 @@ and category confirmation buttons itself; Hermes's journal mount stays read-only
   raw SMS bodies, bank account IDs, UPI references, and exact GPS are omitted.
 - **Confirm category** is the only action that saves a mapping. Changing a
   category or requesting a new suggestion does not save it. Authorized Discord
-  users can confirm, choose another account, or dismiss the card.
+  users can confirm, choose another account, or dismiss the card. Confirmed
+  custom category accounts are included in the presets.
 - Confirmation backs up the mapping and journal, updates matching unknown
   history, and preserves historical entries absent from the raw log. Existing
   explicit mappings are never overwritten by a stale card.

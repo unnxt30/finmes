@@ -14,6 +14,7 @@ import discord
 from discord import app_commands
 
 from finmes.enrichment import CATEGORIES
+from finmes.journal import Mappings
 from finmes.reviews import ReviewEngine
 
 log = logging.getLogger(__name__)
@@ -54,7 +55,8 @@ class CategoryModal(discord.ui.Modal, title="Choose a category"):
     account = discord.ui.TextInput(label="Category account", placeholder="expenses:groceries", max_length=100)
 
     def __init__(self, view: ReviewView):
-        super().__init__(custom_id=f"review:modal:{view.review_id}:{view.version}")
+        super().__init__(custom_id=f"review:modal:{view.review_id}:{view.version}"
+                         + (f":{view.batch_id}" if view.batch_id else ""))
         self.review = view
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -65,16 +67,54 @@ class CategoryModal(discord.ui.Modal, title="Choose a category"):
         await interaction_error(interaction, error)
 
 
+def category_choices(engine: ReviewEngine) -> list[tuple[str, str]]:
+    """Confirmed mapping accounts become presets; unsaved selections do not."""
+    choices = list(CATEGORIES)
+    known = {category for category, _ in choices}
+    custom = set(Mappings.load(engine.mappings_path).payees.values()) - known
+    choices.extend((category, category) for category in sorted(custom))
+    return choices
+
+
 class ReviewView(discord.ui.View):
-    def __init__(self, engine: ReviewEngine, row: dict):
+    def __init__(self, engine: ReviewEngine, row: dict, batch_id: str | None = None,
+                 category_page: int | None = None):
         super().__init__(timeout=None)
         self.engine, self.review_id, self.version = engine, row["id"], row["version"]
-        prefix = f"{self.review_id}:{self.version}"
-        select = discord.ui.Select(placeholder="Choose another category", custom_id=f"review:select:{prefix}", row=0,
+        self.batch_id = batch_id
+        prefix = f"{self.review_id}:{self.version}" + (f":{batch_id}" if batch_id else "")
+        choices = category_choices(engine)
+        if row["category"] and row["category"] not in {c for c, _ in choices}:
+            choices.append((row["category"], row["category"]))
+        selected_index = next((i for i, (c, _) in enumerate(choices) if c == row["category"]), 0)
+        self.category_page = selected_index // 25 if category_page is None else category_page
+        self.category_page = min(self.category_page, (len(choices) - 1) // 25)
+        self.category_pages = (len(choices) + 24) // 25
+        if self.category_page:
+            prefix += f":p{self.category_page}"
+        select = discord.ui.Select(placeholder=f"Choose category ({self.category_page + 1}/{self.category_pages})",
+            custom_id=f"review:select:{prefix}", row=0,
             options=[discord.SelectOption(label=description[:100], value=category,
-                      default=category == row["category"]) for category, description in CATEGORIES])
+                      default=category == row["category"])
+                     for category, description in choices[self.category_page * 25:(self.category_page + 1) * 25]])
         select.callback = self.on_select
         self.add_item(select)
+        if self.category_pages > 1:
+            for name, label, offset in (("previous", "Previous categories", -1), ("next", "More categories", 1)):
+                button = discord.ui.Button(label=label, custom_id=f"review:{name}:{prefix}", row=1,
+                    disabled=not 0 <= self.category_page + offset < self.category_pages)
+                async def page_callback(interaction, offset=offset):
+                    try:
+                        self.engine.authorize(interaction.user.id)
+                        await interaction.response.defer()
+                        current = self.engine.get(self.review_id)
+                        self.engine._check(current, self.version)
+                        view = ReviewView(self.engine, current, self.batch_id, self.category_page + offset)
+                        await interaction.edit_original_response(embed=view.card_embed(current), view=view)
+                    except (ValueError, PermissionError) as exc:
+                        await interaction_error(interaction, exc)
+                button.callback = page_callback
+                self.add_item(button)
         for name, label, callback, style in (
             ("confirm", "Confirm category", self.on_confirm, discord.ButtonStyle.success),
             ("custom", "Other category", self.on_custom, discord.ButtonStyle.secondary),
@@ -82,7 +122,7 @@ class ReviewView(discord.ui.View):
             ("skip", "Dismiss", self.on_skip, discord.ButtonStyle.secondary),
         ):
             button = discord.ui.Button(label=label, custom_id=f"review:{name}:{prefix}", style=style,
-                                       row=1, disabled=name == "confirm" and not row["category"])
+                                       row=2 if self.category_pages > 1 else 1, disabled=name == "confirm" and not row["category"])
             button.callback = callback
             self.add_item(button)
 
@@ -104,9 +144,9 @@ class ReviewView(discord.ui.View):
             await interaction.response.defer()
             row = await asyncio.to_thread(self.engine.choose, self.review_id, self.version, interaction.user.id, account)
             if interaction.message is not None:
-                await interaction.edit_original_response(embed=review_embed(row), view=ReviewView(self.engine, row))
+                await interaction.edit_original_response(embed=self.card_embed(row), view=ReviewView(self.engine, row, self.batch_id))
             else:
-                await interaction.followup.send(embed=review_embed(row), view=ReviewView(self.engine, row), ephemeral=True)
+                await interaction.followup.send(embed=self.card_embed(row), view=ReviewView(self.engine, row, self.batch_id), ephemeral=True)
         except (ValueError, PermissionError) as exc:
             await interaction_error(interaction, exc)
 
@@ -122,9 +162,37 @@ class ReviewView(discord.ui.View):
             self.engine.authorize(interaction.user.id)
             await interaction.response.defer()
             row = await asyncio.to_thread(self.engine.refresh, self.review_id, self.version, interaction.user.id)
-            await interaction.edit_original_response(embed=review_embed(row), view=ReviewView(self.engine, row))
+            await interaction.edit_original_response(embed=self.card_embed(row), view=ReviewView(self.engine, row, self.batch_id))
         except (ValueError, PermissionError) as exc:
             await interaction_error(interaction, exc)
+
+    def card_embed(self, row: dict) -> discord.Embed:
+        embed = review_embed(row)
+        if self.batch_id:
+            batch = self.engine.batch(self.batch_id)
+            embed.add_field(name="Review progress",
+                            value=f"{batch['position'] + 1} of {len(batch['queue'])} payees", inline=False)
+        return embed
+
+    async def finish_card(self, interaction: discord.Interaction, message: str):
+        # Acknowledge the successful write before making another provider request.
+        await interaction.edit_original_response(content=message, embed=None, view=None,
+                                                  allowed_mentions=discord.AllowedMentions.none())
+        if not self.batch_id:
+            return
+        try:
+            row = await asyncio.to_thread(self.engine.batch_next, self.batch_id)
+            if row is None:
+                await interaction.edit_original_response(content=message + "\nReview session complete.")
+                return
+            row = await asyncio.to_thread(self.engine.prepare, row["id"])
+            view = ReviewView(self.engine, row, self.batch_id)
+            await interaction.edit_original_response(content=message, embed=view.card_embed(row), view=view)
+        except Exception:
+            log.exception("Could not load next review after successful action")
+            await interaction.followup.send(
+                "Your previous action succeeded. Could not load the next payee; run /review to continue.",
+                ephemeral=True)
 
     async def on_confirm(self, interaction: discord.Interaction):
         try:
@@ -132,9 +200,8 @@ class ReviewView(discord.ui.View):
             await interaction.response.defer()
             changed = await asyncio.to_thread(self.engine.confirm, self.review_id, self.version, interaction.user.id)
             row = self.engine.get(self.review_id)
-            await interaction.edit_original_response(
-                content=f"Saved **{discord.utils.escape_markdown(row['payee'])} → {row['category']}**. Updated {changed} unknown transaction(s).",
-                embed=None, view=None, allowed_mentions=discord.AllowedMentions.none())
+            await self.finish_card(interaction,
+                f"Saved **{discord.utils.escape_markdown(row['payee'])} → {row['category']}**. Updated {changed} unknown transaction(s).")
         except (ValueError, PermissionError) as exc:
             await interaction_error(interaction, exc)
 
@@ -143,7 +210,7 @@ class ReviewView(discord.ui.View):
             self.engine.authorize(interaction.user.id)
             await interaction.response.defer()
             await asyncio.to_thread(self.engine.skip, self.review_id, self.version, interaction.user.id)
-            await interaction.edit_original_response(content="Dismissed. No category mapping was saved. Use /review with this payee to reopen it.", embed=None, view=None)
+            await self.finish_card(interaction, "Dismissed. No category mapping was saved. Use /review with this payee to reopen it.")
         except (ValueError, PermissionError) as exc:
             await interaction_error(interaction, exc)
 
@@ -178,8 +245,10 @@ class FinanceBot(discord.Client):
         self.watch_task = None
 
         @self.tree.command(name="review", description="Review a suggested category; confirmation is required to save")
-        @app_commands.describe(payee="Optional exact payee name, including a previously dismissed payee")
-        async def review(interaction: discord.Interaction, payee: str | None = None):
+        @app_commands.describe(payee="Optional exact payee name, including a previously dismissed payee",
+                               count="Review up to this many payees one by one (1–50); omit for all pending")
+        async def review(interaction: discord.Interaction, payee: str | None = None,
+                         count: app_commands.Range[int, 1, 50] | None = None):
             try:
                 engine.authorize(interaction.user.id)
                 await interaction.response.defer(ephemeral=True)
@@ -191,7 +260,9 @@ class FinanceBot(discord.Client):
                     await interaction.followup.send("No matching unknown payees to review.", ephemeral=True)
                     return
                 row = await asyncio.to_thread(engine.prepare, row["id"])
-                await interaction.followup.send(embed=review_embed(row), view=ReviewView(engine, row), ephemeral=True)
+                batch_id = await asyncio.to_thread(engine.start_batch, interaction.user.id, row, count, single_payee=bool(payee))
+                view = ReviewView(engine, row, batch_id)
+                await interaction.followup.send(embed=view.card_embed(row), view=view, ephemeral=True)
             except (ValueError, PermissionError) as exc:
                 await interaction_error(interaction, exc)
 
@@ -200,10 +271,20 @@ class FinanceBot(discord.Client):
             log.exception("Review command failed", exc_info=error)
             await interaction_error(interaction, getattr(error, "original", error))
 
+    def restore_review_views(self, row: dict, batch_id: str | None = None):
+        first = ReviewView(self.engine, row, batch_id, 0)
+        self.add_view(first)
+        for page in range(1, first.category_pages):
+            self.add_view(ReviewView(self.engine, row, batch_id, page))
+
     async def setup_hook(self):
         await asyncio.to_thread(self.engine.scan)
         for row in await asyncio.to_thread(self.engine.pending):
-            self.add_view(ReviewView(self.engine, row))
+            self.restore_review_views(row)
+        for batch_id in await asyncio.to_thread(self.engine.active_batches):
+            row = await asyncio.to_thread(self.engine.batch_next, batch_id)
+            if row and row["state"] == "pending":
+                self.restore_review_views(row, batch_id)
         await self.tree.sync()
         self.watch_task = asyncio.create_task(self.watch_reviews())
 

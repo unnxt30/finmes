@@ -77,6 +77,10 @@ class ReviewEngine:
                     auto_notify INTEGER NOT NULL DEFAULT 0, notified_at TEXT,
                     approved_by INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS review_batches (
+                    id TEXT PRIMARY KEY, actor INTEGER NOT NULL, queue TEXT NOT NULL,
+                    position INTEGER NOT NULL DEFAULT 0
+                );
                 CREATE TABLE IF NOT EXISTS places_cache (
                     point TEXT PRIMARY KEY, places TEXT NOT NULL, expires_at TEXT NOT NULL
                 );
@@ -150,6 +154,54 @@ class ReviewEngine:
             row = db.execute("SELECT * FROM reviews WHERE " + " AND ".join(clauses)
                              + " ORDER BY json_extract(candidate, '$.examples[0].date') DESC, updated_at DESC, payee LIMIT 1", values).fetchone()
         return self._decode(row)
+
+    def start_batch(self, actor: int, first: dict, count: int | None = None,
+                    *, single_payee: bool = False) -> str:
+        self.authorize(actor)
+        if count is not None and (isinstance(count, bool) or not 1 <= count <= 50):
+            raise ValueError("Choose a count between 1 and 50.")
+        with self.db() as db:
+            rows = db.execute("SELECT id FROM reviews WHERE state IN ('waiting','pending') "
+                              "ORDER BY json_extract(candidate, '$.examples[0].date') DESC, updated_at DESC, payee").fetchall()
+            queue = [first["id"]]
+            if not single_payee:
+                queue += [r["id"] for r in rows if r["id"] != first["id"]]
+            if count is not None:
+                queue = queue[:count]
+            batch_id = uuid.uuid4().hex
+            db.execute("INSERT INTO review_batches (id,actor,queue) VALUES (?,?,?)",
+                       (batch_id, actor, json.dumps(queue)))
+        return batch_id
+
+    def batch(self, batch_id: str) -> dict:
+        with self.db() as db:
+            row = db.execute("SELECT * FROM review_batches WHERE id=?", (batch_id,)).fetchone()
+        if row is None:
+            raise ValueError("This review session has ended; run /review again.")
+        result = dict(row)
+        result["queue"] = json.loads(result["queue"])
+        return result
+
+    def batch_next(self, batch_id: str) -> dict | None:
+        """Advance past closed cards; never consume a pending card or save a category."""
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            batch = db.execute("SELECT * FROM review_batches WHERE id=?", (batch_id,)).fetchone()
+            if batch is None:
+                return None
+            queue, position = json.loads(batch["queue"]), batch["position"]
+            while position < len(queue):
+                row = db.execute("SELECT * FROM reviews WHERE id=?", (queue[position],)).fetchone()
+                if row and row["state"] in {"waiting", "pending"}:
+                    break
+                position += 1
+            db.execute("UPDATE review_batches SET position=? WHERE id=?", (position, batch_id))
+            return self._decode(row) if position < len(queue) else None
+
+    def active_batches(self) -> list[str]:
+        with self.db() as db:
+            return [r["id"] for r in db.execute(
+                "SELECT id FROM review_batches WHERE position < json_array_length(queue)")]
 
     def pending(self) -> list[dict]:
         with self.db() as db:
