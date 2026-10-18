@@ -200,9 +200,10 @@ and category confirmation buttons itself; Hermes's journal mount stays read-only
 - Confirmation backs up the mapping and journal, updates matching unknown
   history, and preserves historical entries absent from the raw log. Existing
   explicit mappings are never overwritten by a stale card.
-- Pending reviews survive bot restarts. Startup seeds the historical backlog
-  quietly; new unknown transactions trigger one card per payee in the configured
-  home channel (or a DM when no home channel is configured), at most one per poll.
+- Pending reviews survive bot restarts. Reviews are **on demand by default**:
+  run `/review` to start a session. New transactions do not send unsolicited
+  cards or trigger background Decisions requests. To explicitly enable automatic
+  cards, set `DISCORD_REVIEW_NOTIFICATIONS=true` and recreate the Discord service.
 - API failures and uncertain answers leave manual category selection available.
   They never block SMS ingestion or auto-save a category.
 
@@ -274,7 +275,8 @@ generates Hermes's own environment; do not edit `.hermes/.env` directly.
 | `OPENROUTER_API_KEY` | Hermes finance conversation and tool use. |
 | `DISCORD_BOT_TOKEN` | Discord bot login. |
 | `DISCORD_ALLOWED_USERS` | Comma-separated Discord user IDs allowed to chat and confirm. |
-| `DISCORD_HOME_CHANNEL` | Optional channel for new unknown-payee cards; otherwise DM the first allowed user by numeric ID. |
+| `DISCORD_REVIEW_NOTIFICATIONS` | Defaults to `false`. Set `true` only to opt into automatic review cards. |
+| `DISCORD_HOME_CHANNEL` | Destination for opt-in automatic cards; otherwise DM the first allowed user by numeric ID. |
 | `OPENAI_API_KEY` | Direct OpenAI key for Decisions category suggestions; independent of OpenRouter. |
 | `MAPPLS_API_KEY` | Optional nearby-place lookup for GPS-tagged reviews and the agent's `nearby` helper. |
 | `FIRECRAWL_API_KEY` | Optional agent web search/scraping. |

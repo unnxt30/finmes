@@ -235,7 +235,8 @@ class HermesClient:
 
 
 class FinanceBot(discord.Client):
-    def __init__(self, engine: ReviewEngine, hermes: HermesClient, home_channel: int | None):
+    def __init__(self, engine: ReviewEngine, hermes: HermesClient, home_channel: int | None,
+                 *, auto_reviews: bool = False):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions.none())
@@ -243,6 +244,7 @@ class FinanceBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.chat_locks = {}
         self.watch_task = None
+        self.auto_reviews = auto_reviews
 
         @self.tree.command(name="review", description="Review a suggested category; confirmation is required to save")
         @app_commands.describe(payee="Optional exact payee name, including a previously dismissed payee",
@@ -286,7 +288,8 @@ class FinanceBot(discord.Client):
             if row and row["state"] == "pending":
                 self.restore_review_views(row, batch_id)
         await self.tree.sync()
-        self.watch_task = asyncio.create_task(self.watch_reviews())
+        if self.auto_reviews:
+            self.watch_task = asyncio.create_task(self.watch_reviews())
 
     async def on_ready(self):
         log.info("Discord connected as %s; /review registered", self.user)
@@ -343,7 +346,8 @@ def main():
     engine = ReviewEngine(Path(os.environ.get("FINMES_DATA_DIR", "/app/data")), allowed,
                           openai_key=os.environ.get("OPENAI_API_KEY", ""), mappls_key=os.environ.get("MAPPLS_API_KEY", ""))
     bot = FinanceBot(engine, HermesClient(os.environ.get("HERMES_URL", "http://hermes:8642"), key),
-                     int(os.environ["DISCORD_HOME_CHANNEL"]) if os.environ.get("DISCORD_HOME_CHANNEL") else None)
+                     int(os.environ["DISCORD_HOME_CHANNEL"]) if os.environ.get("DISCORD_HOME_CHANNEL") else None,
+                     auto_reviews=os.environ.get("DISCORD_REVIEW_NOTIFICATIONS", "false").lower() == "true")
     bot.run(token, log_handler=None)
 
 

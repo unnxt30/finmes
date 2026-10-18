@@ -169,6 +169,7 @@ def test_batch_survives_restart_and_select_does_not_advance(engine):
         bot = FinanceBot(restarted, HermesClient('http://hermes:8642', 'test'), None)
         bot.tree.sync = AsyncMock()
         await bot.setup_hook()
+        assert bot.watch_task is None  # No unsolicited reviews or provider calls on startup.
         assert any(getattr(v, 'batch_id', None) == batch_id for v in bot.persistent_views)
         await bot.close()
     asyncio.run(run())
