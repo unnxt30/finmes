@@ -1,66 +1,73 @@
 # finmes
 
-Personal finance pipeline: bank SMS on an iPhone become an
-[hledger](https://hledger.org) journal on an always-on Mac, with
-[Hermes Agent](https://github.com/NousResearch/hermes-agent) as the
-conversational layer on top — ask "what did I spend on groceries in June?"
-from Discord and it runs the hledger queries.
+Personal finance pipeline: bank SMS received on an iPhone become an
+[hledger](https://hledger.org) journal on a VPS. Ask questions in Discord through
+[Hermes Agent](https://github.com/NousResearch/hermes-agent), and review unknown
+payees using Mappls context and OpenAI Decisions suggestions.
 
-Design principle throughout: **deterministic writes, agentic reads**. SMS →
-journal is pure regex + mapping tables (replayable, testable, no LLM in the
-money path). The agent only reads the journal and orchestrates; it never
-writes an entry.
+**Current deployment:** GCP VPS, Docker Compose, HTTPS ingestion at
+`https://finmes.unnat.xyz/ingest`. The iPhone retains its existing bank/keyword
+filter. The Mac is needed only for catching up from synced Messages, not for
+normal ingestion. Tailscale is not required for the VPS deployment.
+
+Amounts and transaction details come from deterministic parsing. Hermes reads
+the journal; category suggestions only become mappings after you confirm them.
+
+## Features
+
+| Feature | What it does |
+| --- | --- |
+| iPhone SMS ingestion | Accepts authenticated JSON over HTTPS, with receipt time and optional location. |
+| Deterministic transaction parsing | Extracts supported bank SMS templates for UPI, cards, NEFT, IMPS, autopay and other transfers. Unknown formats are retained for inspection, not guessed. |
+| Double-entry journal | Stores hledger postings, masked source accounts, payees, references and optional receipt-time/GPS tags. |
+| Safe retries | Transaction keys prevent duplicate journal entries when a message is resent, replayed or recapped. Raw log records may still repeat. |
+| Account and payee mappings | Resolves source accounts from masked IDs/sender prefixes/content markers and categories from exact payee mappings. |
+| Commuting rule | Categorizes otherwise unmapped INR debits under ₹100 in the configured commute windows. |
+| Discord finance questions | Sends authorized users' questions to Hermes, which queries hledger over a read-only journal mount. |
+| Category reviews | `/review` presents an unknown payee, examples and an optional AI suggestion; explicit confirmation saves it. |
+| Mappls context | Uses recorded payment-location tags to fetch nearby places, cached for 24 hours. Nearby places are unverified possibilities. |
+| OpenAI Decisions | Suggests a category from fixed choices, or returns unknown. It complements Hermes through a separate direct OpenAI key. |
+| Historical updates | Confirmed mappings update matching unknown journal history and apply to future transactions; backups are made before rewriting. |
+| Offline catch-up | Recovers an inclusive date range from the Mac's synced Messages database and sends it to the VPS. |
+| CLI maintenance | Supports corpus backfill, raw-log replay, TSV category review and preview/apply recategorization. |
+| Persistent state | Finance files, pending reviews and Hermes history survive container restarts through mounted storage. |
 
 ## How it works
 
 ```mermaid
-flowchart LR
-    subgraph phone [iPhone]
-        A[bank SMS arrives] --> B["Messages automation<br/>(fires on every message)"]
-        B --> C["shortcut: POST body +<br/>timestamp + location"]
-    end
-    C -->|"Tailscale<br/>Bearer token"| D["ingest server :8643<br/>finmes/server.py"]
-    subgraph mac [always-on Mac — docker compose]
-        D --> E{bank-shaped?}
-        E -->|no| X[dropped,<br/>never persisted]
-        E -->|yes| F[["ingest.jsonl<br/>append-only raw log"]]
-        F --> G["parser.py<br/>per-template regexes"]
-        M[["mappings.toml<br/>ask-once payee → account"]] --> G
-        G -->|parsed, new| H[["journal/*.journal<br/>dedup via key: tags"]]
-        G -->|unparsed| R["review queue<br/>expenses:unknown"]
-        H --> I[hledger]
-        I --- J["Hermes Agent<br/>gateway :8642"]
-    end
-    J <-->|chat + cron digests| K[Discord]
+flowchart TD
+    A[iPhone bank SMS] --> B[Existing Shortcut filter]
+    B -->|HTTPS + bearer token| C[VPS ingest endpoint]
+    C --> D[Deterministic parser + raw log]
+    D -->|Supported transaction, new key| E[hledger journal]
+    M[Confirmed mappings + commuting rule] --> E
+    D -->|Unmatched financial message| U[Raw log for parser review]
+    E --> H[Hermes: read-only finance queries]
+    H <--> Q[Discord chat]
+    E -->|Unknown category| R[Discord review queue]
+    R --> P[Mappls when GPS is available]
+    P --> O[Decisions category suggestion]
+    O --> V[Review card: choose / refresh / dismiss]
+    V -->|User confirms| M
 ```
 
-Key properties:
-
-- **Raw log first.** Every bank-shaped message is appended to `ingest.jsonl`
-  *before* any journal write. The journal is derived state — delete the year
-  files and replay raw + corpus to rebuild it exactly.
-- **Idempotent everywhere.** Dedup keys (`<upi-ref|hash>.<masked-acct>.<direction>`)
-  live in the journal itself as `key:` tags. Replays, double-POSTs, and the
-  Messages-DB catch-up sweep are all free.
-- **The parser is the filter.** The phone forwards *everything*; the server
-  decides. A broad financial-looking gate controls only what gets *logged* —
-  personal messages return 200 and are never written to disk.
-- **Ask-once mappings.** `mappings.toml` maps masked account ids, sender
-  prefixes, raw-text markers, and exact payee strings to hledger accounts.
-  Unknown payees land in `expenses:unknown` until mapped; use the review and
-  recategorize commands to update history.
+- Financial-looking messages are logged before journal writes. Non-financial
+  messages return `ignored` without being persisted.
+- `unparsed` messages have no journal transaction; they need a parser/template
+  fix. `/review` handles **parsed transactions with unknown payee categories**.
+- The raw log, source corpus and confirmed mappings support replay. Preserve
+  the journal too: historical entries may not exist in the current raw log.
+- Decisions currently classifies payee categories only. Sending all SMS for
+  Decisions-based filtering is an experiment under consideration, **not enabled**.
 
 ## The iOS side
 
-Two pieces in the Shortcuts app, deliberately dumb — every attempt at a
-smart client failed (see gotchas):
+Keep the existing Messages automation and the Shortcut's bank/keyword matching
+for now. No phone-side change is required to use Discord category reviews.
 
-1. **A Messages automation** — trigger "When I get a message", content filter
-   effectively always-true, Run Immediately. No sender filtering, no keyword
-   filtering: all intelligence is server-side.
-2. **A shortcut** the automation runs — takes the message as input and POSTs
-   JSON to the Mac's Tailscale Serve HTTPS URL ending in `/ingest`, with the
-   bearer token. Start Serve with `tailscale serve 8643`:
+The Shortcut POSTs the message body, receipt timestamp and optional phone location
+to `https://finmes.unnat.xyz/ingest`, using
+`Authorization: Bearer <FINMES_INGEST_TOKEN>` and JSON content type:
 
    ```json
    {
@@ -78,21 +85,18 @@ smart client failed (see gotchas):
 |---|---|---|
 | `parsed` | matched a template, in the journal (`duplicate: true` if already there) | raw log + journal |
 | `skipped` | bank noise — OTPs, declines, pre-debit notices | raw log |
-| `unparsed` | bank-shaped but no template matched — review queue | raw log |
+| `unparsed` | bank-shaped but no template matched — raw log for parser review | raw log |
 | `ignored` | not a bank SMS | nothing |
 
 Hard-won gotchas baked into this design:
 
-- **iOS gives shortcuts no access to the SMS sender.** Every property tried
-  (Name, `detect.text`, Get Details of Messages) returns the message *body*
-  or doesn't exist. Hence `sender: "ios"` hardcoded, and account resolution
-  from message content (`[accounts]` masked ids, `[markers]` raw-text
-  fallback in `mappings.toml`).
-- **`lat`/`lon` arrive as strings**, not numbers. Location is review-time
-  context only (map link), never used for merchant resolution.
-- **The phone reaches the Mac over Tailscale Serve** in the local deployment.
-  The HTTPS URL is private to your tailnet, so keep Tailscale connected on
-  the iPhone when the automation sends a message.
+- **The current Shortcut uses `sender: "ios"`.** Account resolution therefore
+  relies on message content: `[accounts]` masked IDs and `[markers]` raw-text
+  fallbacks in `mappings.toml`. The Shortcut matching step remains unchanged.
+- **`lat`/`lon` arrive as strings**, not numbers. Location provides optional Mappls
+  context during category review; it does not establish the merchant identity.
+- **The VPS URL works independently of the Mac.** For the optional local
+  deployment, Tailscale Serve can expose port 8643 to your tailnet instead.
 - **macOS firewall silently drops inbound** for CLI python — the interpreter
   binary needs its own allowlist entry, separate from Python.app.
 - Debugging shortcuts blind is miserable; iCloud syncs them to
@@ -100,34 +104,68 @@ Hard-won gotchas baked into this design:
   blob → `plutil` → JSON gives a full action-level audit of what a shortcut
   actually does.
 
-If the Mac was offline, wait for Messages in iCloud to sync the missed SMS,
-then run the recap command on the Mac (outside Docker):
+## Catch up missed messages
 
-```sh
-python3 -m finmes.cli recap 2026-10-10 2026-10-12
-```
-
-The dates are inclusive **Messages receipt dates** in the Mac's local time
-zone. Recap reads `~/Library/Messages/chat.db` without changing it and adds
-newly parsed transactions to `data/journal/`. Existing transaction keys are
-skipped; the command reports added, duplicate, and unparsed counts. Give the
-terminal running it Full Disk Access in macOS Settings. Wait until the missed
-messages are visible in the Mac's Messages app before recapping. SMS recovered
-this way have no iPhone Shortcut location tags. Recap writes to the journal,
-not to the raw `ingest.jsonl` log.
-
-After moving to a VPS, run recap on the Mac with the remote URL instead:
+Wait until the missed SMS are visible in the Mac's Messages app after iCloud
+sync. Run this **on the Mac, outside Docker**, from the project folder:
 
 ```sh
 python3 -m finmes.cli recap 2026-10-13 2026-10-18 --url https://finmes.unnat.xyz/ingest
 ```
 
-This reads the synced Messages database on the Mac and sends recovered
-messages to the VPS for logging, parsing, categorization, and deduplication.
-It leaves the Mac's journal unchanged and uses `FINMES_INGEST_TOKEN` from
-the environment or the current directory's `.env`. Dates are inclusive;
-rerunning an overlapping range is safe. If interrupted, rerun the same range.
+- Dates are inclusive **Messages receipt dates** in the Mac's local timezone.
+- Give the terminal Full Disk Access in macOS Settings so it can read
+  `~/Library/Messages/chat.db`. The database is read without being modified.
+- The command uses `FINMES_INGEST_TOKEN` from the environment or the local `.env`
+  and sends messages and receipt timestamps to the VPS for logging and parsing.
+- The Mac's journal stays unchanged. Overlapping ranges and retries are safe
+  because existing transaction keys are skipped. The result reports added,
+  duplicate and unparsed/skipped counts.
+- Recovered messages have no original iPhone Shortcut GPS tags.
+- For an intentional local deployment only, omit `--url` to write directly to
+  the Mac's `data/journal/`; that mode does not append to `ingest.jsonl`.
+
 Normal ingestion comes directly from the iPhone Shortcut and needs no Mac.
+
+## Try Discord and Decisions
+
+1. Open the server containing the **finmes** bot. For finance chat, mention the
+   bot, for example `@finmes What is my latest transaction?`. In a direct message,
+   ask the question without a mention. Only IDs in `DISCORD_ALLOWED_USERS` work.
+2. In a server channel where the bot is installed, type `/review` and select the
+   **finmes** command. The review response is visible only to you. This requests
+   a suggestion for an unknown payee; you do not need to call the API yourself.
+3. Inspect **Category to confirm**, **AI confidence**, **Nearby possibilities**
+   when present, and **Suggestion context**. “Suggested by Decisions” means the
+   provider returned a suggestion. An insufficient-evidence result is valid;
+   unavailable-provider messages mean manual selection is available instead.
+4. For a harmless experiment, inspect the card and leave it open, or select a
+   different category without confirming. Neither action saves a mapping.
+5. **Confirm category** saves the mapping and updates matching unknown history.
+   Use **Other category** for a custom hledger account, **Refresh suggestion** to
+   request another suggestion, or **Dismiss** to close without saving. To reopen
+   a dismissed unknown payee, use `/review` with its exact `payee` option.
+
+Run `/review` again for the next payee after confirming or dismissing. A payee
+with no location is still reviewable, but cannot exercise Mappls. Mac recap
+messages do not contain the original phone GPS. Existing explicitly mapped
+payees and entries already covered by the commuting rule are not in this queue.
+
+If `/review` is absent, confirm you installed the bot with the `bot` and
+`applications.commands` scopes, reopen Discord, and check the service log for
+`/review registered`. If normal chat does not work, check the user allowlist and
+Message Content intent in the Discord Developer Portal. A normal chat answer
+checks Hermes/OpenRouter; a review suggestion checks the separate Decisions path.
+
+On the VPS, inspect the service status and recent review errors:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.vps.yml --profile vps ps
+docker compose logs --tail=50 discord-bot
+```
+
+Do not paste `.env`, authorization headers or raw financial logs into public
+support channels. A provider error or missing key never blocks ingestion.
 
 ## Categorizing unknown payees
 
@@ -158,7 +196,9 @@ and category confirmation buttons itself; Hermes's journal mount stays read-only
 Review state is private runtime data at `data/review-state.sqlite3`; keep it out
 of Git and include it in secure VPS backups.
 
-The CLI batch review remains available:
+The CLI batch review remains available. Run it where the authoritative data
+lives (the VPS in the current setup), or prefix commands with
+`docker compose exec ingest` to use the deployed container:
 
 Export the unknown payees, ordered by total INR debit amount:
 
@@ -189,6 +229,9 @@ python3 -m finmes.cli recategorize --db ~/Library/Messages/chat.db --apply
 docker compose start ingest
 ```
 
+The `--db` option above is for a Mac with Messages access. On the VPS, omit it
+and recover available receipt times from the raw ingest log instead.
+
 Historical entries whose receipt time is unavailable remain uncategorized
 unless you map their payee. Historical rewrites save the previous journal
 files under `data/backups/`.
@@ -196,7 +239,7 @@ files under `data/backups/`.
 ## Running it
 
 ```sh
-cp .env.example .env   # fill in: OpenRouter key, ingest token, API key, (Discord)
+cp .env.example .env   # fill the required keys/tokens listed below
 git clone git@github.com:unnxt30/finmes-data.git data
 docker compose up -d --build
 ```
@@ -206,36 +249,110 @@ hermes+hledger image, generates `.hermes/.env` from the root `.env`, and
 starts the gateway (8642, loopback), ingest server (8643), and Discord frontend. Details, health
 checks, Discord linking, and day-2 ops: [instructions.md](instructions.md).
 
+## Configuration
+
+Use `.env.example` as the template. The root `.env` configures Compose and
+generates Hermes's own environment; do not edit `.hermes/.env` directly.
+
+| Variable | Purpose |
+| --- | --- |
+| `FINMES_INGEST_TOKEN` | Shared secret for the phone/remote recap and ingest endpoint. |
+| `API_SERVER_KEY` | Internal authenticated access from the Discord frontend to Hermes. |
+| `OPENROUTER_API_KEY` | Hermes finance conversation and tool use. |
+| `DISCORD_BOT_TOKEN` | Discord bot login. |
+| `DISCORD_ALLOWED_USERS` | Comma-separated Discord user IDs allowed to chat and confirm. |
+| `DISCORD_HOME_CHANNEL` | Optional channel for new unknown-payee cards; otherwise DM the first allowed user by numeric ID. |
+| `OPENAI_API_KEY` | Direct OpenAI key for Decisions category suggestions; independent of OpenRouter. |
+| `MAPPLS_API_KEY` | Optional nearby-place lookup for GPS-tagged reviews and the agent's `nearby` helper. |
+| `FIRECRAWL_API_KEY` | Optional agent web search/scraping. |
+
+Changing the laptop's `.env` does not update the VPS automatically. Edit the VPS
+file and recreate the affected service. For Decisions/Mappls review settings:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.vps.yml --profile vps up -d --no-build --no-deps discord-bot
+```
+
 ## Layout
 
 ```
-docker-compose.yml   the whole stack; .env is the single secrets file
-finmes/parser.py     SMS → structured Txn (regex per bank template)
-finmes/journal.py    Txn → hledger entry (mapping, dedup, rendering)
-finmes/server.py     POST /ingest — logging gate, raw log, journal append
-finmes/cli.py        `finmes recap` from Mac Messages, `backfill`/`replay`
-data/                private finmes-data clone: journal/, mappings.toml, ingest.jsonl
-.hermes/             agent state; only config.yaml + the finmes skill tracked
-scripts/             corpus extraction from the Mac Messages DB, tooling
-tests/               pytest — parser, journal, server (real SMS fixtures)
+docker-compose.yml   Hermes, ingest, Discord frontend, optional Caddy
+Caddyfile            VPS HTTPS reverse proxy
+finmes/parser.py     supported SMS templates → structured transactions
+finmes/journal.py    source/category mappings, deduplication, journal rendering
+finmes/server.py     authenticated ingestion, raw logging and status responses
+finmes/cli.py        recap, backfill, replay, review, apply-review, recategorize
+finmes/categories.py category review exports and backed-up historical rewrites
+finmes/enrichment.py Mappls lookup and direct OpenAI Decisions client
+finmes/reviews.py    persistent review queue, authorization and confirmation
+finmes/discord_bot.py Discord review cards and chat bridge to Hermes
+data/                private journal, mappings, raw log and review state
+.hermes/             agent configuration, skill and private runtime history
+scripts/             Mac Messages corpus extraction and other tooling
+tests/               parsing, ingestion, journals, provider contracts and reviews
 ```
+
+## Replay and backfill
+
+Run these where the authoritative `data/` lives (the VPS for the current setup):
+
+```sh
+python3 -m finmes.cli backfill path/to/corpus.tsv
+python3 -m finmes.cli replay data/ingest.jsonl
+```
+
+Both skip existing transaction keys. Replays do not fix already-written category
+postings; use category review/recategorization for those. To run a CLI command
+inside the deployed ingest container, prefix it with
+`docker compose exec ingest`, for example:
+
+```sh
+docker compose exec ingest python -m finmes.cli review
+```
+
+## Storage, privacy and backups
+
+- Keep `data/` private: journal, mappings, raw bank-shaped SMS and backups contain
+  financial information. The application repository does not contain these files.
+- Back up the journal, `mappings.toml`, `ingest.jsonl`, review SQLite database,
+  Hermes runtime databases and Caddy certificate storage securely off the VPS.
+  SQLite files should be backed up consistently, using SQLite backup facilities
+  or while their writers are stopped.
+- Review state is runtime data and is excluded from Git. `.env` and Hermes
+  runtime databases must also stay out of Git. Git pushes do not back up secrets
+  or all runtime state.
+- Mappls receives coordinates for nearby-place searches. Decisions receives the
+  limited evidence described above; Hermes receives your questions and tool
+  results through OpenRouter. The financial-looking logging gate can retain OTPs
+  or other bank notices even though they do not become journal transactions.
+- An unavailable VPS does not provide a durable queue for failed Shortcut calls.
+  Use Mac Messages recap after synchronization to recover supported messages.
 
 ## The agent
 
-Hermes Agent runs in the same container as hledger with a
-[skill file](.hermes/skills/finmes-hledger/SKILL.md) distilled from the
-hledger manual: question→command recipes, query syntax, and guardrails
-(journal is read-only to the agent; never fabricate numbers). Model:
-`openai/gpt-6-luna` via OpenRouter, with reasoning effort `none` so Hermes's
-Chat Completions tool calls remain available. Every trajectory is persisted
-in `.hermes/state.db` (`auto_prune: false`) as a future fine-tuning corpus —
-hledger gives verifiable ground truth for filtering traces.
+Hermes runs alongside hledger with a
+[finance skill](.hermes/skills/finmes-hledger/SKILL.md) containing query recipes
+and instructions to ground answers in journal results. Its journal mount is
+read-only. It uses `openai/gpt-6-luna` through OpenRouter, with reasoning effort
+`none` in the current configuration. Chat sessions are scoped per Discord
+channel and user. Agent history is retained in `.hermes/state.db` with automatic
+pruning disabled.
 
-Entries ingested from the phone carry `lat:`/`lon:` tags; the `nearby` tool
-in the agent container resolves them to surrounding POIs during payee review.
+The Discord frontend handles review commands and confirmation callbacks, and
+forwards ordinary questions to Hermes. Decisions is a separate category
+classifier; it does not replace the conversational agent or parse transaction
+amounts. The agent's `nearby` helper can also look up recorded location tags.
 
-Roadmap: cron digests (weekly + month-end), payee review loop (batch-ask
-unknowns, write mappings), threshold alerts, subscription/autopay audit,
-budget reports, and deterministic `finmes reconcile` against monthly bank
-statements (backfills missed SMS, catches non-SMS items like interest and
-charges, asserts balances).
+## Development
+
+Python 3.11+ is required. Run the test suite with pytest and the project dependency:
+
+```sh
+uv run --no-project --with pytest --with 'discord.py>=2.5,<3' python -m pytest -q
+```
+
+## Planned, not enabled
+
+Decisions-based SMS filtering, scheduled weekly/month-end digests, threshold
+alerts, subscription/autopay audits, budget reports and bank-statement
+reconciliation remain future work. The current Shortcut filter stays in place.
