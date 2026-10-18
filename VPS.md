@@ -126,6 +126,23 @@ fails, restore `z-ai/glm-5.3-flash` and `reasoning_effort: medium` in
 ## Backups
 
 Back up `data/` (especially `ingest.jsonl`, `mappings.toml`, and `journal/`),
-`.hermes/state.db`, and Caddy's `caddy_data` volume. Keep backups encrypted
+`data/review-state.sqlite3`, `.hermes/state.db`, and Caddy's `caddy_data` volume. Keep backups encrypted
 and outside the VPS. The raw SMS log can regenerate journal entries, but it
 cannot restore mapping changes or agent history by itself.
+
+## Discord category confirmations
+
+The `discord-bot` service owns the Discord connection and forwards normal
+questions to the existing Hermes API. The generated Hermes `.env` no longer
+contains Discord credentials, preventing duplicate bot responses. Both services
+reuse `finmes-hermes:latest`; the deployed image already includes discord.py.
+No extra image build is required for this change.
+
+Set `OPENAI_API_KEY` in the root `.env` for the dedicated OpenAI Decisions
+endpoint; the OpenRouter key continues to power Hermes. Then recreate
+`hermes-env`, restart Hermes so its old Discord adapter disconnects, and start
+`discord-bot` with the VPS Compose files. Check logs for the frontend connection
+and use `/review` in Discord. Without the direct key, manual review still works.
+
+Keep `review-state.sqlite3` and its journal/WAL files out of the private data
+Git repository. Only authorized confirmation callbacks save payee mappings.

@@ -131,6 +131,35 @@ Normal ingestion comes directly from the iPhone Shortcut and needs no Mac.
 
 ## Categorizing unknown payees
 
+Discord supports a Mappls + OpenAI Decisions review flow. Add a direct
+`OPENAI_API_KEY` to `.env` alongside the existing Mappls and Discord keys.
+The Discord frontend sends normal questions to Hermes and handles `/review`
+and category confirmation buttons itself; Hermes's journal mount stays read-only.
+
+- Use `/review` to see one unknown payee at a time, newest first. Optionally
+  supply an exact payee name to reopen a dismissed review.
+- GPS-tagged examples get nearby Mappls candidates (cached for 24 hours).
+  Without GPS, the suggestion uses the payee and transaction context.
+- Decisions selects from a fixed set of category accounts or says unknown.
+  It receives payee, dates, amounts, directions, and nearby place descriptions;
+  raw SMS bodies, bank account IDs, UPI references, and exact GPS are omitted.
+- **Confirm category** is the only action that saves a mapping. Changing a
+  category or requesting a new suggestion does not save it. Authorized Discord
+  users can confirm, choose another account, or dismiss the card.
+- Confirmation backs up the mapping and journal, updates matching unknown
+  history, and preserves historical entries absent from the raw log. Existing
+  explicit mappings are never overwritten by a stale card.
+- Pending reviews survive bot restarts. Startup seeds the historical backlog
+  quietly; new unknown transactions trigger one card per payee in the configured
+  home channel (or a DM when no home channel is configured), at most one per poll.
+- API failures and uncertain answers leave manual category selection available.
+  They never block SMS ingestion or auto-save a category.
+
+Review state is private runtime data at `data/review-state.sqlite3`; keep it out
+of Git and include it in secure VPS backups.
+
+The CLI batch review remains available:
+
 Export the unknown payees, ordered by total INR debit amount:
 
 ```sh
@@ -174,7 +203,7 @@ docker compose up -d --build
 
 For a public HTTPS VPS deployment, see [VPS.md](VPS.md). The local setup builds the
 hermes+hledger image, generates `.hermes/.env` from the root `.env`, and
-starts the gateway (8642, loopback) and ingest server (8643). Details, health
+starts the gateway (8642, loopback), ingest server (8643), and Discord frontend. Details, health
 checks, Discord linking, and day-2 ops: [instructions.md](instructions.md).
 
 ## Layout

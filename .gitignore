@@ -9,6 +9,7 @@ data/
 __pycache__/
 *.egg-info/
 .pytest_cache/
+._*
 
 # .hermes is runtime state (secrets, sessions, trajectory db) EXCEPT the bits
 # a fresh clone needs: model config and our custom skill.

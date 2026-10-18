@@ -17,13 +17,10 @@ services:
         [ -n "$$API_SERVER_KEY" ] || { echo "API_SERVER_KEY missing from .env" >&2; exit 1; }
         printf 'OPENROUTER_API_KEY=%s\nFIRECRAWL_API_KEY=%s\nAPI_SERVER_ENABLED=true\nAPI_SERVER_KEY=%s\nAPI_SERVER_HOST=0.0.0.0\n' \
           "$$OPENROUTER_API_KEY" "$$FIRECRAWL_API_KEY" "$$API_SERVER_KEY" > /opt/data/.env
-        if [ -n "$$DISCORD_BOT_TOKEN" ]; then
-          printf 'DISCORD_BOT_TOKEN=%s\nDISCORD_ALLOWED_USERS=%s\nDISCORD_HOME_CHANNEL=%s\n' \
-            "$$DISCORD_BOT_TOKEN" "$$DISCORD_ALLOWED_USERS" "$$DISCORD_HOME_CHANNEL" >> /opt/data/.env
-        fi
 
   hermes:
     build: .
+    image: finmes-hermes:latest
     container_name: hermes
     restart: unless-stopped
     command: gateway run
@@ -54,6 +51,24 @@ services:
     ports:
       # Keep ingest on loopback. Use Tailscale Serve on a Mac or Caddy on a VPS.
       - "127.0.0.1:8643:8643"
+
+  discord-bot:
+    image: finmes-hermes:latest
+    container_name: finmes-discord-bot
+    restart: unless-stopped
+    entrypoint: ["python", "-m", "finmes.discord_bot"]
+    working_dir: /app
+    env_file: .env
+    depends_on:
+      - hermes
+    environment:
+      HERMES_URL: http://hermes:8642
+      FINMES_DATA_DIR: /app/data
+      TZ: Asia/Kolkata
+    volumes:
+      - ./finmes:/app/finmes:ro
+      - ./data:/app/data
+      - /etc/localtime:/etc/localtime:ro
 
   caddy:
     image: caddy:2

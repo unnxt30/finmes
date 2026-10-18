@@ -99,6 +99,10 @@ def apply_review(review_path: Path, mappings_path: Path) -> int:
             additions[payee] = category
     if not additions:
         return 0
+    return _save_payee_mappings(Path(mappings_path), text, additions)
+
+
+def _save_payee_mappings(mappings_path: Path, text: str, additions: dict[str, str]) -> int:
     section = re.search(r"(?m)^\[payees\]\s*$", text)
     if not section:
         raise ValueError("mappings.toml has no [payees] section")
@@ -112,6 +116,23 @@ def apply_review(review_path: Path, mappings_path: Path) -> int:
     shutil.copy2(mappings_path, backup_dir / Path(mappings_path).name)
     _atomic_write(Path(mappings_path), updated)
     return len(additions)
+
+
+def confirm_payee_category(mappings_path: Path, journal_dir: Path,
+                          payee: str, category: str) -> int:
+    """Persist an explicitly confirmed mapping and update unknown history only."""
+    if not payee.strip() or not ACCOUNT_RE.fullmatch(category):
+        raise ValueError("invalid payee or category")
+    with journal_lock(journal_dir):
+        mappings = Mappings.load(mappings_path)
+        previous = mappings.payees.get(payee)
+        if previous is not None and previous != category:
+            raise ValueError("This payee already has a different mapping; refresh the review.")
+        if previous is None:
+            _save_payee_mappings(mappings_path, mappings_path.read_text(), {payee: category})
+        changed, _ = _recategorize_locked(
+            journal_dir, Mappings.load(mappings_path), {}, apply=True)
+        return changed
 
 
 def timestamp_index(log_path: Path | None = None, db_path: Path | None = None):
@@ -191,13 +212,17 @@ def _recategorize_locked(journal_dir: Path, mappings: Mappings, times: dict[str,
 
 
 def _atomic_write(path: Path, text: str) -> None:
+    original = path.stat()
     fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
         with os.fdopen(fd, "w") as f:
+            current = os.fstat(f.fileno())
+            if (current.st_uid, current.st_gid) != (original.st_uid, original.st_gid):
+                os.fchown(f.fileno(), original.st_uid, original.st_gid)
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        os.chmod(name, path.stat().st_mode)
+        os.chmod(name, original.st_mode)
         os.replace(name, path)
     finally:
         if os.path.exists(name):
