@@ -27,7 +27,8 @@ def engine(tmp_path, monkeypatch):
 def interaction(actor=10, category="expenses:health"):
     response = SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock(), is_done=lambda: True)
     return SimpleNamespace(user=SimpleNamespace(id=actor), response=response,
-                           followup=SimpleNamespace(send=AsyncMock()), message=SimpleNamespace(edit=AsyncMock()),
+                           followup=SimpleNamespace(send=AsyncMock()), edit_original_response=AsyncMock(),
+                           message=SimpleNamespace(edit=AsyncMock(side_effect=AssertionError("Private cards require the interaction edit endpoint"))),
                            data={"values": [category]})
 
 
@@ -39,9 +40,13 @@ def test_selecting_category_does_not_save_until_confirm_button(engine):
         click = interaction()
         await view.on_select(click)
         assert Mappings.load(engine.mappings_path).payees == {}
-        new_view = click.message.edit.call_args.kwargs["view"]
+        new_view = click.edit_original_response.call_args.kwargs["view"]
         assert new_view.version > view.version
-        await new_view.on_confirm(interaction())
+        confirm_click = interaction()
+        await new_view.on_confirm(confirm_click)
+        assert "Saved" in confirm_click.edit_original_response.call_args.kwargs["content"]
+        click.message.edit.assert_not_called()
+        confirm_click.message.edit.assert_not_called()
         assert Mappings.load(engine.mappings_path).payees == {"SHOP": "expenses:health"}
     asyncio.run(run())
 
@@ -91,4 +96,28 @@ def test_frontend_registers_review_without_network_calls(engine):
         bot = FinanceBot(engine, HermesClient("http://hermes:8642", "test"), None)
         assert bot.tree.get_command("review") is not None
         await bot.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("action", ["on_refresh", "on_skip"])
+def test_private_review_buttons_use_interaction_edit_endpoint(engine, action):
+    async def run():
+        row = engine.prepare(engine.next()["id"])
+        click = interaction()
+        await getattr(ReviewView(engine, row), action)(click)
+        click.edit_original_response.assert_awaited_once()
+        click.message.edit.assert_not_called()
+        assert Mappings.load(engine.mappings_path).payees == {}
+    asyncio.run(run())
+
+
+def test_category_modal_without_source_message_sends_private_followup(engine):
+    async def run():
+        row = engine.prepare(engine.next()["id"])
+        click = interaction()
+        click.message = None
+        await ReviewView(engine, row).choose(click, "expenses:health")
+        click.followup.send.assert_awaited_once()
+        assert click.followup.send.call_args.kwargs["ephemeral"] is True
+        assert Mappings.load(engine.mappings_path).payees == {}
     asyncio.run(run())

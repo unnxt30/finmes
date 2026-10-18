@@ -104,7 +104,7 @@ class ReviewView(discord.ui.View):
             await interaction.response.defer()
             row = await asyncio.to_thread(self.engine.choose, self.review_id, self.version, interaction.user.id, account)
             if interaction.message is not None:
-                await interaction.message.edit(embed=review_embed(row), view=ReviewView(self.engine, row))
+                await interaction.edit_original_response(embed=review_embed(row), view=ReviewView(self.engine, row))
             else:
                 await interaction.followup.send(embed=review_embed(row), view=ReviewView(self.engine, row), ephemeral=True)
         except (ValueError, PermissionError) as exc:
@@ -122,7 +122,7 @@ class ReviewView(discord.ui.View):
             self.engine.authorize(interaction.user.id)
             await interaction.response.defer()
             row = await asyncio.to_thread(self.engine.refresh, self.review_id, self.version, interaction.user.id)
-            await interaction.message.edit(embed=review_embed(row), view=ReviewView(self.engine, row))
+            await interaction.edit_original_response(embed=review_embed(row), view=ReviewView(self.engine, row))
         except (ValueError, PermissionError) as exc:
             await interaction_error(interaction, exc)
 
@@ -132,7 +132,7 @@ class ReviewView(discord.ui.View):
             await interaction.response.defer()
             changed = await asyncio.to_thread(self.engine.confirm, self.review_id, self.version, interaction.user.id)
             row = self.engine.get(self.review_id)
-            await interaction.message.edit(
+            await interaction.edit_original_response(
                 content=f"Saved **{discord.utils.escape_markdown(row['payee'])} → {row['category']}**. Updated {changed} unknown transaction(s).",
                 embed=None, view=None, allowed_mentions=discord.AllowedMentions.none())
         except (ValueError, PermissionError) as exc:
@@ -143,7 +143,7 @@ class ReviewView(discord.ui.View):
             self.engine.authorize(interaction.user.id)
             await interaction.response.defer()
             await asyncio.to_thread(self.engine.skip, self.review_id, self.version, interaction.user.id)
-            await interaction.message.edit(content="Dismissed. No category mapping was saved. Use /review with this payee to reopen it.", embed=None, view=None)
+            await interaction.edit_original_response(content="Dismissed. No category mapping was saved. Use /review with this payee to reopen it.", embed=None, view=None)
         except (ValueError, PermissionError) as exc:
             await interaction_error(interaction, exc)
 
