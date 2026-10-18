@@ -2,8 +2,12 @@
 
 The whole stack runs from docker compose: Hermes Agent as the chat/Q&A layer
 (port 8642, loopback only), hledger as the ledger backend, and the ingest
-endpoint the iPhone shortcut POSTs to (port 8643, reached via Tailscale).
-Same layout on the dev Mac and the always-on MacBook Air.
+endpoint the iPhone shortcut POSTs to (port 8643, loopback only, exposed
+privately through Tailscale Serve on a Mac).
+
+For a public HTTPS VPS, use [VPS.md](VPS.md). On a local Mac, the ingest
+server binds to loopback; run `tailscale serve 8643` to give it a private
+HTTPS URL for the iPhone shortcut. Keep Tailscale connected on the iPhone.
 
 ## Fresh machine (clone-and-run)
 
@@ -14,7 +18,7 @@ Same layout on the dev Mac and the always-on MacBook Air.
 3. Clone the private data repo into `data/`:
 
    ```sh
-   git clone git@github-personal:unnxt30/finmes-data.git data
+   git clone git@github.com:unnxt30/finmes-data.git data
    ```
 4. ```sh
    docker compose up -d --build
@@ -72,7 +76,8 @@ Chat with the agent from Discord; cron digests land in a channel. One-time:
 ## Ingest endpoint
 
 The shortcut POSTs `{text, sender, received_at, location}` with
-`Authorization: Bearer $FINMES_INGEST_TOKEN` to `http://<tailnet-ip>:8643/ingest`.
+`Authorization: Bearer $FINMES_INGEST_TOKEN` to the Mac's Tailscale Serve URL
+with `/ingest` appended.
 Response statuses: `parsed` (in the journal; `duplicate: true` if already
 there), `skipped` (bank noise, logged), `unparsed` (logged for review),
 `ignored` (not a bank SMS — never persisted). Financial-looking messages are
@@ -120,6 +125,9 @@ Agent runs with tool calls take a while (30s+); that's normal.
 | Stop everything | `docker compose down` |
 | Rebuild after Dockerfile change | `docker compose up -d --build` |
 | Run hledger directly | `docker exec hermes hledger -f /opt/journal/main.journal balance` |
+| Catch up synced Mac SMS by date | `python3 -m finmes.cli recap 2026-10-10 2026-10-12` on the Mac, after Messages sync (inclusive receipt dates; terminal needs Full Disk Access) |
+| Review unknown payees | `python3 -m finmes.cli review`, fill `data/payee-review.tsv` category column, then `python3 -m finmes.cli apply-review` |
+| Apply commuting rule to history | Stop ingest, then `python3 -m finmes.cli recategorize --db ~/Library/Messages/chat.db --apply`, then start ingest (Terminal needs Full Disk Access) |
 | Backfill SMS corpus into the journal | `.venv/bin/finmes backfill` (idempotent; re-run any time) |
 | Export agent traces (training corpus) | `docker exec hermes hermes sessions export --format jsonl - --yes > traces/$(date +%Y%m%d).jsonl` |
 | Replay raw ingest log into the journal | `.venv/bin/finmes replay` (idempotent) |

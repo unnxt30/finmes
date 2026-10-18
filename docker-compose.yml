@@ -35,7 +35,7 @@ services:
       MAPPLS_API_KEY: ${MAPPLS_API_KEY:-}
     volumes:
       - ./.hermes:/opt/data
-      - ./data/journal:/opt/journal
+      - ./data/journal:/opt/journal:ro
     ports:
       # Loopback only: the agent API is reached from this machine (or via
       # Tailscale serve later), never the LAN.
@@ -49,10 +49,26 @@ services:
     command: python -m finmes.server
     env_file: .env
     volumes:
-      # Whole repo, not single files: mappings.toml is hand-edited and editors
-      # replace the inode, which would go stale behind a single-file bind mount.
-      - .:/app
+      - ./finmes:/app/finmes:ro
+      - ./data:/app/data
     ports:
-      # All interfaces: the iPhone shortcut reaches this via the Mac's tailnet
-      # IP. Bearer-token auth gates it (same posture as the stub).
-      - "8643:8643"
+      # Keep ingest on loopback. Use Tailscale Serve on a Mac or Caddy on a VPS.
+      - "127.0.0.1:8643:8643"
+
+  caddy:
+    image: caddy:2
+    profiles: [vps]
+    restart: unless-stopped
+    depends_on:
+      - ingest
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,9 @@
+.git
+.env
+.hermes
+data
+.venv
+.pytest_cache
+**/__pycache__
+*.egg-info
+samples

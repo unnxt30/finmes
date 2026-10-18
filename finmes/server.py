@@ -10,6 +10,7 @@ persisted, so personal messages don't accumulate on disk.
 import json
 import os
 import re
+from hmac import compare_digest
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -26,14 +27,17 @@ FINANCIAL_RE = re.compile(
     r"|payment|spent|withdraw|deposit|\bbalance\b|statement|mandate",
     re.IGNORECASE,
 )
+MAX_BODY_BYTES = 16 * 1024
 
 
 def handle(payload: dict, journal_dir: Path, mappings: Mappings, log_path: Path) -> dict:
     """Process one ingest payload; returns the {status, summary, duplicate} contract."""
     text, sender = payload["text"], payload["sender"]
     received = date.today()
+    received_at = None
     if payload.get("received_at"):
-        received = datetime.fromisoformat(payload["received_at"]).date()
+        received_at = datetime.fromisoformat(payload["received_at"])
+        received = received_at.date()
 
     txn = parse(sender, text, received=received)
     if txn is None and not FINANCIAL_RE.search(text):
@@ -61,7 +65,7 @@ def handle(payload: dict, journal_dir: Path, mappings: Mappings, log_path: Path)
         f.write(json.dumps(record) + "\n")
 
     if txn and not duplicate:
-        journal_ingest([(sender, text, received, payload.get("location"))],
+        journal_ingest([(sender, text, received, payload.get("location"), received_at)],
                        journal_dir, mappings)
 
     return {"status": status, "summary": summary, "duplicate": duplicate}
@@ -92,18 +96,22 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path != "/ingest":
             self._send(404, {"error": "not found"})
             return
-        if self.headers.get("Authorization") != f"Bearer {self.token}":
+        if not compare_digest(self.headers.get("Authorization", ""), f"Bearer {self.token}"):
             self._send(401, {"error": "bad token"})
             return
         try:
-            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            length = int(self.headers["Content-Length"])
+            if length < 1 or length > MAX_BODY_BYTES:
+                self._send(413, {"error": "invalid body size"})
+                return
+            payload = json.loads(self.rfile.read(length))
             # Reload per request so mapping edits apply without a restart.
             mappings = Mappings.load(self.mappings_path)
             resp = handle(payload, self.journal_dir, mappings, self.log_path)
         except (KeyError, ValueError, TypeError) as e:
             self._send(400, {"error": f"bad payload: {e}"})
             return
-        print(f"{datetime.now():%H:%M:%S} {resp['status']}: {payload.get('text', '')[:80]}", flush=True)
+        print(f"{datetime.now():%H:%M:%S} {resp['status']}", flush=True)
         self._send(200, resp)
 
 

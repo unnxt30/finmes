@@ -1,0 +1,12 @@
+# Use with: docker compose -f docker-compose.yml -f docker-compose.vps.yml --profile vps up -d --build
+services:
+  hermes:
+    environment:
+      TZ: Asia/Kolkata
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+  ingest:
+    environment:
+      TZ: Asia/Kolkata
+    volumes:
+      - /etc/localtime:/etc/localtime:ro

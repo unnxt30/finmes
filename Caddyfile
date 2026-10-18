@@ -1,0 +1,10 @@
+finmes.unnat.xyz {
+    @ingest path /ingest
+    handle @ingest {
+        reverse_proxy ingest:8643
+    }
+
+    handle {
+        respond "Not found" 404
+    }
+}

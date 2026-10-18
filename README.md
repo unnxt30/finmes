@@ -47,8 +47,8 @@ Key properties:
   personal messages return 200 and are never written to disk.
 - **Ask-once mappings.** `mappings.toml` maps masked account ids, sender
   prefixes, raw-text markers, and exact payee strings to hledger accounts.
-  Unknown payees land in `expenses:unknown` until mapped; remap and replay
-  to rewrite history correctly.
+  Unknown payees land in `expenses:unknown` until mapped; use the review and
+  recategorize commands to update history.
 
 ## The iOS side
 
@@ -59,7 +59,8 @@ smart client failed (see gotchas):
    effectively always-true, Run Immediately. No sender filtering, no keyword
    filtering: all intelligence is server-side.
 2. **A shortcut** the automation runs — takes the message as input and POSTs
-   JSON to `http://<tailnet-ip>:8643/ingest` with the bearer token:
+   JSON to the Mac's Tailscale Serve HTTPS URL ending in `/ingest`, with the
+   bearer token. Start Serve with `tailscale serve 8643`:
 
    ```json
    {
@@ -89,8 +90,9 @@ Hard-won gotchas baked into this design:
   fallback in `mappings.toml`).
 - **`lat`/`lon` arrive as strings**, not numbers. Location is review-time
   context only (map link), never used for merchant resolution.
-- **The phone reaches the Mac over Tailscale** — no public endpoint. The
-  tailnet IP changes if you re-login to a different tailscale account.
+- **The phone reaches the Mac over Tailscale Serve** in the local deployment.
+  The HTTPS URL is private to your tailnet, so keep Tailscale connected on
+  the iPhone when the automation sends a message.
 - **macOS firewall silently drops inbound** for CLI python — the interpreter
   binary needs its own allowlist entry, separate from Python.app.
 - Debugging shortcuts blind is miserable; iCloud syncs them to
@@ -98,20 +100,79 @@ Hard-won gotchas baked into this design:
   blob → `plutil` → JSON gives a full action-level audit of what a shortcut
   actually does.
 
-Missed POSTs (phone offline, Mac asleep) are covered by a fallback sweep:
-Text Message Forwarding lands the same SMS in the Mac's Messages database,
-`scripts/extract_bank_sms.py` extracts them with *real* sender ids, and
-idempotent ingest makes re-feeding them free.
+If the Mac was offline, wait for Messages in iCloud to sync the missed SMS,
+then run the recap command on the Mac (outside Docker):
+
+```sh
+python3 -m finmes.cli recap 2026-10-10 2026-10-12
+```
+
+The dates are inclusive **Messages receipt dates** in the Mac's local time
+zone. Recap reads `~/Library/Messages/chat.db` without changing it and adds
+newly parsed transactions to `data/journal/`. Existing transaction keys are
+skipped; the command reports added, duplicate, and unparsed counts. Give the
+terminal running it Full Disk Access in macOS Settings. Wait until the missed
+messages are visible in the Mac's Messages app before recapping. SMS recovered
+this way have no iPhone Shortcut location tags. Recap writes to the journal,
+not to the raw `ingest.jsonl` log.
+
+After moving to a VPS, run recap on the Mac with the remote URL instead:
+
+```sh
+python3 -m finmes.cli recap 2026-10-13 2026-10-18 --url https://finmes.unnat.xyz/ingest
+```
+
+This reads the synced Messages database on the Mac and sends recovered
+messages to the VPS for logging, parsing, categorization, and deduplication.
+It leaves the Mac's journal unchanged and uses `FINMES_INGEST_TOKEN` from
+the environment or the current directory's `.env`. Dates are inclusive;
+rerunning an overlapping range is safe. If interrupted, rerun the same range.
+Normal ingestion comes directly from the iPhone Shortcut and needs no Mac.
+
+## Categorizing unknown payees
+
+Export the unknown payees, ordered by total INR debit amount:
+
+```sh
+python3 -m finmes.cli review
+```
+
+Open `data/payee-review.tsv`. The `suggestion` column is a hint for a few
+obvious merchant names and is never applied automatically. Fill only the
+`category` column for payees you recognize (for example,
+`expenses:groceries` or `assets:transfers`). Leave uncertain rows empty.
+Then apply your choices to future and existing entries:
+
+```sh
+python3 -m finmes.cli apply-review
+```
+
+For an unknown INR debit **under ₹100**, the receipt time categorizes it as
+`expenses:transport:commuting` during 09:00–11:59 or 15:00–19:59, on any day.
+An explicit payee mapping always wins. New phone and recap entries store a
+`time:` tag. To update older entries, preview then apply recovered times
+from the raw ingest log and, if Terminal has Full Disk Access, Mac Messages:
+
+```sh
+python3 -m finmes.cli recategorize --db ~/Library/Messages/chat.db
+docker compose stop ingest
+python3 -m finmes.cli recategorize --db ~/Library/Messages/chat.db --apply
+docker compose start ingest
+```
+
+Historical entries whose receipt time is unavailable remain uncategorized
+unless you map their payee. Historical rewrites save the previous journal
+files under `data/backups/`.
 
 ## Running it
 
 ```sh
 cp .env.example .env   # fill in: OpenRouter key, ingest token, API key, (Discord)
-git clone <your-private-finmes-data-repo> data
+git clone git@github.com:unnxt30/finmes-data.git data
 docker compose up -d --build
 ```
 
-That's the whole setup on a fresh machine — compose builds the
+For a public HTTPS VPS deployment, see [VPS.md](VPS.md). The local setup builds the
 hermes+hledger image, generates `.hermes/.env` from the root `.env`, and
 starts the gateway (8642, loopback) and ingest server (8643). Details, health
 checks, Discord linking, and day-2 ops: [instructions.md](instructions.md).
@@ -123,7 +184,7 @@ docker-compose.yml   the whole stack; .env is the single secrets file
 finmes/parser.py     SMS → structured Txn (regex per bank template)
 finmes/journal.py    Txn → hledger entry (mapping, dedup, rendering)
 finmes/server.py     POST /ingest — logging gate, raw log, journal append
-finmes/cli.py        `finmes backfill` — replay an SMS corpus, idempotent
+finmes/cli.py        `finmes recap` from Mac Messages, `backfill`/`replay`
 data/                private finmes-data clone: journal/, mappings.toml, ingest.jsonl
 .hermes/             agent state; only config.yaml + the finmes skill tracked
 scripts/             corpus extraction from the Mac Messages DB, tooling
@@ -136,7 +197,8 @@ Hermes Agent runs in the same container as hledger with a
 [skill file](.hermes/skills/finmes-hledger/SKILL.md) distilled from the
 hledger manual: question→command recipes, query syntax, and guardrails
 (journal is read-only to the agent; never fabricate numbers). Model:
-`z-ai/glm-5.3-flash` via OpenRouter. Every trajectory is persisted
+`openai/gpt-6-luna` via OpenRouter, with reasoning effort `none` so Hermes's
+Chat Completions tool calls remain available. Every trajectory is persisted
 in `.hermes/state.db` (`auto_prune: false`) as a future fine-tuning corpus —
 hledger gives verifiable ground truth for filtering traces.
 

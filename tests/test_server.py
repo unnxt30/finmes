@@ -57,6 +57,17 @@ def env(tmp_path):
 
 
 class TestHandle:
+    def test_mac_metadata_files_do_not_block_ingestion(self, env):
+        journal_dir, mappings, log = env
+        (journal_dir / "._2026.journal").write_bytes(b"\x00\x05\x16\x07\xff")
+        (journal_dir / "directory.journal").mkdir()
+        first = handle(payload(), journal_dir, mappings, log)
+        second = handle(payload(), journal_dir, mappings, log)
+        assert first["status"] == "parsed" and first["duplicate"] is False
+        assert second["status"] == "parsed" and second["duplicate"] is True
+        assert len(existing_keys(journal_dir)) == 1
+        assert len(log.read_text().splitlines()) == 2
+
     def test_parsed_sms_appends_journal_entry(self, env):
         journal_dir, mappings, log = env
         resp = handle(payload(), journal_dir, mappings, log)
@@ -187,6 +198,10 @@ class TestHTTP:
     def test_malformed_payload_400(self, server):
         code, _ = self._post(server, {"sender": "ios"}, token="sekrit")
         assert code == 400
+
+    def test_oversized_body_413(self, server):
+        code, _ = self._post(server, payload(text="x" * 16384), token="sekrit")
+        assert code == 413
 
     def test_health(self, server):
         with urllib.request.urlopen(f"{server}/health") as resp:

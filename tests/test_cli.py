@@ -1,6 +1,8 @@
-"""Tests for finmes CLI: replay of the raw ingest log."""
+"""Tests for finmes CLI: replay and Mac Messages recap."""
 
 import json
+import sqlite3
+from datetime import datetime
 
 from finmes.cli import main as cli_main
 
@@ -47,3 +49,38 @@ def test_replay_is_idempotent(tmp_path):
     cli_main(args)
     cli_main(args)
     assert (journal / "2026.journal").read_text().count("SANTUSHTI") == 1
+
+
+def test_recap_reads_only_requested_days_and_skips_existing_entries(tmp_path, capsys):
+    db = tmp_path / "chat.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+        CREATE TABLE message (handle_id INTEGER, text TEXT, attributedBody BLOB,
+                              date INTEGER, is_from_me INTEGER);
+        INSERT INTO handle VALUES (1, 'ICICIT-S(smsft_fi)');
+    """)
+    def apple_ns(day):
+        dt = datetime.fromisoformat(day + "T12:00:00+00:00")
+        return int((dt.timestamp() - 978307200) * 1_000_000_000)
+    conn.executemany("INSERT INTO message VALUES (1, ?, NULL, ?, 0)", [
+        (RAW, apple_ns("2026-07-22")),
+        (RAW.replace("163451439277", "163451439278"), apple_ns("2026-07-23")),
+        (RAW.replace("163451439277", "163451439279"), apple_ns("2026-07-24")),
+    ])
+    conn.commit()
+    conn.close()
+
+    journal = tmp_path / "journal"
+    journal.mkdir()
+    mappings = tmp_path / "mappings.toml"
+    mappings.write_text(MAPPINGS)
+    args = ["recap", "2026-07-22", "2026-07-23", "--db", str(db),
+            "--journal-dir", str(journal), "--mappings", str(mappings)]
+    assert cli_main(args) == 0
+    assert "added: 2" in capsys.readouterr().out
+    entry = (journal / "2026.journal").read_text()
+    assert "163451439277" in entry and "163451439278" in entry
+    assert "163451439279" not in entry
+    assert cli_main(args) == 0
+    assert "added: 0  duplicate: 2" in capsys.readouterr().out

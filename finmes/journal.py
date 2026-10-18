@@ -5,11 +5,14 @@ SMS + the mapping table. Dedup state lives in the journal itself as key: tags.
 """
 
 import hashlib
+import fcntl
+import os
 import re
 import tomllib
 from collections.abc import Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 
@@ -58,10 +61,16 @@ class Mappings:
                 return account
         return "assets:bank:unknown"
 
-    def target_account(self, payee: str, direction: str) -> str:
+    def target_account(self, payee: str, direction: str, *, amount: Decimal | None = None,
+                       currency: str = "INR", received_at: datetime | None = None) -> str:
         """The category (or transfer) account for the other side of the entry."""
         if payee in self.payees:
             return self.payees[payee]
+        if (direction == "debit" and currency == "INR" and amount is not None
+                and 0 < amount < 100 and received_at is not None):
+            at = received_at.time()
+            if time(9) <= at < time(12) or time(15) <= at < time(20):
+                return "expenses:transport:commuting"
         return "expenses:unknown" if direction == "debit" else "income:unknown"
 
 
@@ -103,15 +112,19 @@ def _location_tags(location) -> str:
     return f", lat:{lat}, lon:{lon}"
 
 
-def render_entry(txn: Txn, sender: str, mappings: Mappings, location=None) -> str:
+def render_entry(txn: Txn, sender: str, mappings: Mappings, location=None,
+                 received_at: datetime | None = None) -> str:
     """One hledger entry. The amount sits on the account money flowed INTO:
     the category account for debits, the bank/card account for credits."""
     payee = txn.counterparty or synthesize_payee(txn)
     source = mappings.source_account(txn, sender)
-    target = mappings.target_account(payee, txn.direction)
+    target = mappings.target_account(payee, txn.direction, amount=txn.amount,
+                                     currency=txn.currency, received_at=received_at)
     tags = f"key:{dedup_key(txn)}"
     if txn.ref:
         tags += f", ref:{txn.ref}"
+    if received_at is not None:
+        tags += f", time:{received_at:%H:%M}"
     tags += _location_tags(location)
     amount = _fmt_amount(txn)
     if txn.direction == "debit":
@@ -132,8 +145,24 @@ def existing_keys(journal_dir: Path) -> set[str]:
     """Dedup state = key: tags already in the journal. No sidecar files."""
     keys: set[str] = set()
     for path in Path(journal_dir).glob("*.journal"):
+        # macOS archive transfers can create binary ._*.journal metadata.
+        # Match hledger's normal include behavior by skipping hidden files.
+        if path.name.startswith(".") or not path.is_file():
+            continue
         keys.update(_KEY_RE.findall(path.read_text()))
     return keys
+
+
+@contextmanager
+def journal_lock(journal_dir: Path):
+    """Serialize append and historical rewrite across host and container."""
+    fd = os.open(journal_dir, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 @dataclass
@@ -145,7 +174,8 @@ class Summary:
 
 
 def ingest(
-    records: Iterable[tuple[str, str, date, dict | None]],
+    records: Iterable[tuple[str, str, date, dict | None] |
+                      tuple[str, str, date, dict | None, datetime | None]],
     journal_dir: Path,
     mappings: Mappings,
 ) -> Summary:
@@ -153,9 +183,16 @@ def ingest(
     to <year>.journal files. Idempotent: entries whose dedup key is already in
     the journal (or earlier in the same batch) are skipped."""
     journal_dir = Path(journal_dir)
+    with journal_lock(journal_dir):
+        return _ingest_locked(records, journal_dir, mappings)
+
+
+def _ingest_locked(records, journal_dir: Path, mappings: Mappings) -> Summary:
     seen = existing_keys(journal_dir)
     summary = Summary()
-    for sender, body, received, location in records:
+    for record in records:
+        sender, body, received, location = record[:4]
+        received_at = record[4] if len(record) == 5 else None
         txn = parse(sender, body, received=received)
         if txn is None:
             summary.unparsed += 1
@@ -166,13 +203,16 @@ def ingest(
             continue
         seen.add(key)
         payee = txn.counterparty or synthesize_payee(txn)
-        if payee not in mappings.payees:
+        if mappings.target_account(payee, txn.direction, amount=txn.amount,
+                                   currency=txn.currency, received_at=received_at) in {
+                                       "expenses:unknown", "income:unknown"}:
             summary.unknown_payees.add(payee)
         year_file = journal_dir / f"{txn.date.year}.journal"
         with year_file.open("a") as f:
             if year_file.stat().st_size:
                 f.write("\n")
-            f.write(render_entry(txn, sender, mappings, location=location))
+            f.write(render_entry(txn, sender, mappings, location=location,
+                                 received_at=received_at))
         summary.added += 1
     return summary
 
