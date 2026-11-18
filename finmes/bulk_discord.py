@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import discord
 
-from finmes.discord_bot import ReviewView, interaction_error, review_embed
+from finmes.discord_bot import ReviewView, interaction_error, review_embed, send_private_review
 
 
 log = logging.getLogger(__name__)
@@ -29,6 +29,11 @@ def summary_embed(batch):
     return embed
 
 
+async def acknowledge(interaction):
+    if not interaction.response.is_done():
+        await interaction.response.defer()
+
+
 class BulkSummary(discord.ui.View):
     def __init__(self, store, batch):
         super().__init__(timeout=None)
@@ -50,7 +55,8 @@ class BulkSummary(discord.ui.View):
 
     async def interaction_check(self, interaction):
         try:
-            self.store.get(self.batch_id, interaction.user.id, self.version)
+            await acknowledge(interaction)
+            await asyncio.to_thread(self.store.get, self.batch_id, interaction.user.id, self.version)
             return True
         except (ValueError, PermissionError) as exc:
             await interaction_error(interaction, exc)
@@ -62,10 +68,10 @@ class BulkSummary(discord.ui.View):
 
     async def edit(self, interaction):
         try:
-            batch = self.store.get(self.batch_id, interaction.user.id, self.version)
+            await acknowledge(interaction)
+            batch = await asyncio.to_thread(self.store.get, self.batch_id, interaction.user.id, self.version)
             if batch['state'] != 'open':
                 raise ValueError('This batch is closed; run /review again.')
-            await interaction.response.defer()
             index = int(interaction.data['values'][0])
             item = batch['items'][index]
             row = self.store.engine.get(item['id'])
@@ -77,7 +83,7 @@ class BulkSummary(discord.ui.View):
 
     async def approve(self, interaction):
         try:
-            await interaction.response.defer()
+            await acknowledge(interaction)
             result = await asyncio.to_thread(self.store.approve, self.batch_id, interaction.user.id, self.version)
             message = (f"Saved {len(result['saved'])} payee mappings; updated {result['changed']} unknown transactions. "
                        f"{result['pending']} payees from this batch remain pending.")
@@ -90,7 +96,7 @@ class BulkSummary(discord.ui.View):
 
     async def close_batch(self, interaction):
         try:
-            await interaction.response.defer()
+            await acknowledge(interaction)
             self.store.close(self.batch_id, interaction.user.id, self.version)
             await interaction.edit_original_response(content='Batch closed. No category mappings saved; payees remain pending.',
                                                      embed=None, view=None)
@@ -154,7 +160,7 @@ class BulkItem(ReviewView):
             if interaction.message is not None:
                 await interaction.edit_original_response(embed=view.card_embed(row), view=view)
             else:
-                await interaction.followup.send(embed=view.card_embed(row), view=view, ephemeral=True)
+                await send_private_review(interaction, embed=view.card_embed(row), view=view)
         except (ValueError, PermissionError) as exc:
             await interaction_error(interaction, exc)
 

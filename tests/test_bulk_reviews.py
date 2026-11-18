@@ -164,3 +164,50 @@ def test_default_review_command_creates_summary_without_finance_writes(store):
         assert set(Mappings.load(store.engine.mappings_path).payees) == {'existing'}
         await bot.close()
     asyncio.run(run())
+
+
+def test_private_summary_remains_active_after_library_ephemeral_timeout(store):
+    from finmes.discord_bot import send_private_review
+    async def run():
+        batch = store.create(10)
+        bot = FinanceBot(store.engine, HermesClient('http://hermes:8642', 'test'), None)
+        view = BulkSummary(store, batch)
+        click = interaction()
+        async def ephemeral_send(**kwargs):
+            # Simulate discord.py's injected timeout, shortened for the regression.
+            kwargs['view'].timeout = .01
+            bot._connection.store_view(kwargs['view'], 123)
+        click.followup.send.side_effect = ephemeral_send
+        await send_private_review(click, embed=summary_embed(batch), view=view)
+        await asyncio.sleep(.03)
+        assert view.timeout is None
+        assert not view.is_finished()
+        assert view.is_persistent()
+        assert 'HIGH' not in Mappings.load(store.engine.mappings_path).payees
+        view.stop()
+        await bot.close()
+    asyncio.run(run())
+
+
+def test_edit_acknowledges_before_loading_and_only_once(store, monkeypatch):
+    async def run():
+        batch = store.create(10)
+        view = BulkSummary(store, batch)
+        click = interaction()
+        done = False
+        async def defer():
+            nonlocal done
+            done = True
+        click.response.is_done = lambda: done
+        click.response.defer.side_effect = defer
+        original = store.get
+        def get(*args, **kwargs):
+            assert done, 'Database reads must follow the initial acknowledgement'
+            return original(*args, **kwargs)
+        monkeypatch.setattr(store, 'get', get)
+        assert await view.interaction_check(click)
+        await view.edit(click)
+        click.response.defer.assert_awaited_once()
+        assert isinstance(click.edit_original_response.call_args.kwargs['view'], BulkItem)
+        assert 'HIGH' not in Mappings.load(store.engine.mappings_path).payees
+    asyncio.run(run())

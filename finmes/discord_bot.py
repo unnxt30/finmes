@@ -51,6 +51,14 @@ async def interaction_error(interaction: discord.Interaction, exc: Exception):
         await interaction.followup.send(message, ephemeral=True)
 
 
+async def send_private_review(interaction, *, embed, view):
+    # discord.py applies a 15-minute timeout to ephemeral views during send,
+    # even when constructed with timeout=None. Keep review controls resumable.
+    message = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+    view.timeout = None
+    return message
+
+
 class CategoryModal(discord.ui.Modal, title="Choose a category"):
     account = discord.ui.TextInput(label="Category account", placeholder="expenses:groceries", max_length=100)
 
@@ -146,7 +154,7 @@ class ReviewView(discord.ui.View):
             if interaction.message is not None:
                 await interaction.edit_original_response(embed=self.card_embed(row), view=ReviewView(self.engine, row, self.batch_id))
             else:
-                await interaction.followup.send(embed=self.card_embed(row), view=ReviewView(self.engine, row, self.batch_id), ephemeral=True)
+                await send_private_review(interaction, embed=self.card_embed(row), view=ReviewView(self.engine, row, self.batch_id))
         except (ValueError, PermissionError) as exc:
             await interaction_error(interaction, exc)
 
@@ -261,8 +269,8 @@ class FinanceBot(discord.Client):
                 await interaction.response.defer(ephemeral=True)
                 if not individual and not payee:
                     batch = await asyncio.to_thread(self.bulk_reviews.create, interaction.user.id, count or 10)
-                    await interaction.followup.send(embed=summary_embed(batch),
-                        view=BulkSummary(self.bulk_reviews, batch), ephemeral=True)
+                    await send_private_review(interaction, embed=summary_embed(batch),
+                        view=BulkSummary(self.bulk_reviews, batch))
                     return
                 await asyncio.to_thread(engine.scan)
                 row = await asyncio.to_thread(engine.next, payee=payee)
@@ -274,7 +282,7 @@ class FinanceBot(discord.Client):
                 row = await asyncio.to_thread(engine.prepare, row["id"])
                 batch_id = await asyncio.to_thread(engine.start_batch, interaction.user.id, row, count, single_payee=bool(payee))
                 view = ReviewView(engine, row, batch_id)
-                await interaction.followup.send(embed=view.card_embed(row), view=view, ephemeral=True)
+                await send_private_review(interaction, embed=view.card_embed(row), view=view)
             except (ValueError, PermissionError) as exc:
                 await interaction_error(interaction, exc)
 
