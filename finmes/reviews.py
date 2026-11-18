@@ -9,10 +9,11 @@ import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 from finmes.categories import ACCOUNT_RE, KEY_RE, TIME_RE, _entries, _unknown, confirm_payee_category
-from finmes.enrichment import EnrichmentError, coordinates, decide_category, nearby_places
+from finmes.enrichment import CATEGORIES, EnrichmentError, coordinates, decide_category, nearby_places
 from finmes.journal import Mappings
 
 
@@ -30,7 +31,7 @@ def collect_unknowns(journal_dir: Path, mappings_path: Path) -> list[dict]:
         payee = header[2]
         if not unknown or not key or payee in mappings.payees:
             continue
-        row = groups.setdefault(payee, {"payee": payee, "keys": [], "examples": [], "count": 0})
+        row = groups.setdefault(payee, {"payee": payee, "keys": [], "examples": [], "count": 0, "totals": {}, "debit_inr": "0"})
         amount = next((m[1].strip() for line in lines[1:]
                        if (m := re.match(r"^\s+\S+\s{2,}(.+)$", line))), "")
         example = {"date": header[1], "amount": amount,
@@ -41,6 +42,13 @@ def collect_unknowns(journal_dir: Path, mappings_path: Path) -> list[dict]:
         lon = re.search(r"\blon:([^\s,]+)", header[3])
         if lat and lon and coordinates({"lat": lat[1], "lon": lon[1]}):
             example["location"] = {"lat": lat[1], "lon": lon[1]}
+        number = re.search(r"-?\d[\d,]*(?:\.\d+)?", amount)
+        if number:
+            value = abs(Decimal(number[0].replace(",", "")))
+            currency = "INR" if "₹" in amount else re.sub(r"[-\d,.\s]", "", amount) or "INR"
+            row["totals"][currency] = str(Decimal(row["totals"].get(currency, "0")) + value)
+            if currency == "INR" and unknown[2] == "debit":
+                row["debit_inr"] = str(Decimal(row["debit_inr"]) + value)
         row["keys"].append(key[1])
         row["examples"].append(example)
         row["count"] += 1
@@ -245,7 +253,11 @@ class ReviewEngine:
             else:
                 notes.append("No GPS for these examples; using payee and transaction context.")
             try:
-                suggestion = decide_category(row["candidate"], places, self.openai_key)
+                choices = dict(CATEGORIES)
+                for category in sorted(set(Mappings.load(self.mappings_path).payees.values())):
+                    if ACCOUNT_RE.fullmatch(category) and len(category) <= 100:
+                        choices.setdefault(category, f"User category: {category}")
+                suggestion = decide_category(row["candidate"], places, self.openai_key, list(choices.items()))
                 category, confidence = suggestion.category, suggestion.confidence
                 notes.append(suggestion.note)
             except EnrichmentError as exc:

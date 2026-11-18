@@ -45,3 +45,18 @@ def test_refusal_and_unknown_do_not_suggest_a_category(monkeypatch):
                    {"type": "choice", "name": "category", "choice": "unknown", "confidence": .9}):
         monkeypatch.setattr(api, "_json_request", lambda req: {"answers": [answer]})
         assert api.decide_category(candidate, [], "key").category is None
+
+
+def test_decisions_accepts_only_supplied_custom_choices(monkeypatch):
+    requests = []
+    def fake(req):
+        requests.append(json.loads(req.data))
+        return {'answers': [{'type': 'choice', 'name': 'category',
+                             'choice': 'expenses:investment', 'confidence': .9}]}
+    monkeypatch.setattr(api, '_json_request', fake)
+    candidate = {'payee': 'Platform', 'examples': []}
+    result = api.decide_category(candidate, [], 'key', [*api.CATEGORIES, ('expenses:investment', 'Investment')])
+    assert result.category == 'expenses:investment'
+    assert any(c['value'] == 'expenses:investment' for c in requests[0]['questions'][0]['choices'])
+    with pytest.raises(api.EnrichmentError):
+        api.decide_category(candidate, [], 'key')

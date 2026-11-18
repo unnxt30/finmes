@@ -245,15 +245,25 @@ class FinanceBot(discord.Client):
         self.chat_locks = {}
         self.watch_task = None
         self.auto_reviews = auto_reviews
+        from finmes.bulk_reviews import BulkReviews
+        from finmes.bulk_discord import BulkSummary, summary_embed
+        self.bulk_reviews = BulkReviews(engine)
 
         @self.tree.command(name="review", description="Review a suggested category; confirmation is required to save")
         @app_commands.describe(payee="Optional exact payee name, including a previously dismissed payee",
-                               count="Review up to this many payees one by one (1–50); omit for all pending")
+                               count="Summary: 1–10 payees, default 10. Individual mode: 1–50.",
+                               individual="Use the original one-at-a-time confirmation flow")
         async def review(interaction: discord.Interaction, payee: str | None = None,
-                         count: app_commands.Range[int, 1, 50] | None = None):
+                         count: app_commands.Range[int, 1, 50] | None = None,
+                         individual: bool = False):
             try:
                 engine.authorize(interaction.user.id)
                 await interaction.response.defer(ephemeral=True)
+                if not individual and not payee:
+                    batch = await asyncio.to_thread(self.bulk_reviews.create, interaction.user.id, count or 10)
+                    await interaction.followup.send(embed=summary_embed(batch),
+                        view=BulkSummary(self.bulk_reviews, batch), ephemeral=True)
+                    return
                 await asyncio.to_thread(engine.scan)
                 row = await asyncio.to_thread(engine.next, payee=payee)
                 if row is None and payee:
@@ -287,6 +297,22 @@ class FinanceBot(discord.Client):
             row = await asyncio.to_thread(self.engine.batch_next, batch_id)
             if row and row["state"] == "pending":
                 self.restore_review_views(row, batch_id)
+        from finmes.bulk_discord import BulkSummary, BulkItem
+        with self.engine.db() as db:
+            bulk_ids = [(r['id'], r['actor']) for r in db.execute("SELECT id,actor FROM bulk_reviews WHERE state='open'")]
+        for bulk_id, actor in bulk_ids:
+            if actor not in self.engine.allowed_users:
+                continue
+            batch = self.bulk_reviews.get(bulk_id, actor)
+            self.add_view(BulkSummary(self.bulk_reviews, batch))
+            for index, item in enumerate(batch['items']):
+                row = self.engine.get(item['id'])
+                if row['state'] != 'pending' or row['version'] != item['version']:
+                    continue
+                view = BulkItem(self.bulk_reviews, batch, index, row, 0)
+                self.add_view(view)
+                for page in range(1, view.category_pages):
+                    self.add_view(BulkItem(self.bulk_reviews, batch, index, row, page))
         await self.tree.sync()
         if self.auto_reviews:
             self.watch_task = asyncio.create_task(self.watch_reviews())

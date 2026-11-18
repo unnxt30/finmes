@@ -26,7 +26,7 @@ the journal; category suggestions only become mappings after you confirm them.
 | Discord finance questions | Sends authorized users' questions to Hermes, which queries hledger over a read-only journal mount. |
 | Category reviews | `/review` presents an unknown payee, examples and an optional AI suggestion; explicit confirmation saves it. |
 | Mappls context | Uses recorded payment-location tags to fetch nearby places, cached for 24 hours. Nearby places are unverified possibilities. |
-| OpenAI Decisions | Suggests a category from fixed choices, or returns unknown. It complements Hermes through a separate direct OpenAI key. |
+| OpenAI Decisions | Suggests from built-in and saved custom categories, or returns unknown. It complements Hermes through a separate direct OpenAI key. |
 | Historical updates | Confirmed mappings update matching unknown journal history and apply to future transactions; backups are made before rewriting. |
 | Offline catch-up | Recovers an inclusive date range from the Mac's synced Messages database and sends it to the VPS. |
 | CLI maintenance | Supports corpus backfill, raw-log replay, TSV category review and preview/apply recategorization. |
@@ -132,35 +132,42 @@ Normal ingestion comes directly from the iPhone Shortcut and needs no Mac.
 1. Open the server containing the **finmes** bot. For finance chat, mention the
    bot, for example `@finmes What is my latest transaction?`. In a direct message,
    ask the question without a mention. Only IDs in `DISCORD_ALLOWED_USERS` work.
-2. In a server channel where the bot is installed, type `/review` and select the
-   **finmes** command. It walks through currently pending payees one at a time.
-   Use `/review count:10` to limit the session to 10 payees (allowed range 1–50).
-   The review response is visible only to you; no direct API call is needed.
-3. Inspect **Category to confirm**, **AI confidence**, **Nearby possibilities**
-   when present, and **Suggestion context**. “Suggested by Decisions” means the
-   provider returned a suggestion. An insufficient-evidence result is valid;
-   unavailable-provider messages mean manual selection is available instead.
-4. For a harmless experiment, inspect the card and leave it open, or select a
-   different category without confirming. Neither action saves a mapping.
-5. **Confirm category** saves the mapping and updates matching unknown history.
-   Use **Other category** for a custom hledger account, **Refresh suggestion** to
-   request another suggestion, or **Dismiss** to close without saving. To reopen
-   a dismissed unknown payee, use `/review` with its exact `payee` option.
+2. Type `/review count:10` and select the **finmes** command. The default is a
+   private summary of up to 10 pending payees, ordered by uncategorized INR debit
+   total. Counts of 1–10 are supported in summary mode. Fetching suggestions can
+   take a little time; nothing is saved by opening the summary.
+3. Scan each payee's transaction count, totals (kept separate by currency),
+   proposed category, confidence and inclusion status. Suggestions below 85%
+   confidence, unknown answers and provider failures start **excluded**. This
+   threshold is a review aid, not a guarantee of accuracy.
+4. Use **Edit or exclude a payee** to inspect examples and Mappls context, change
+   the category, enter an **Other category**, or refresh the suggestion.
+   **Include and return** explicitly includes that proposal even if confidence is
+   low; **Exclude and return** leaves it out. **Back to summary** returns without
+   changing its inclusion status. Category changes are proposals only.
+5. Check the button's count, then click **Approve N payee mappings**. Only the
+   included mappings shown in that summary are saved. Matching unknown history
+   is updated with backups, and future transactions use the mappings. Unknown
+   and excluded payees remain pending. **Close without saving** saves no mappings.
 
-Confirming or dismissing automatically loads the next payee in the same card,
-with progress such as “2 of 10.” The session stops at its limit or when its
-initial queue is exhausted. You can leave at any point; unreviewed payees remain
-pending. Selecting or refreshing a category does not advance the session.
-An exact `payee` argument limits the session to that payee.
+Use `/review individual:true count:10` for the original one-at-a-time flow
+(1–50 payees, or omit the count to walk the current queue). Confirming or
+dismissing advances to the next payee. An exact `payee` argument selects that
+payee in individual mode and can reopen a dismissed review.
 
-Custom categories become dropdown presets after confirmation, including on future
-reviews and after restarts. If choices fill the dropdown, **More categories** and
-**Previous categories** let you browse every preset.
+Confirmed custom categories become both dropdown presets **and Decisions
+choices**, including accounts such as `expenses:investment`. Existing cached
+suggestions can be refreshed to reconsider the updated choices. If choices fill
+the dropdown, **More categories** and **Previous categories** browse every preset.
 
-A payee
-with no location is still reviewable, but cannot exercise Mappls. Mac recap
-messages do not contain the original phone GPS. Existing explicitly mapped
-payees and entries already covered by the commuting rule are not in this queue.
+A payee with no location is still reviewable, but cannot exercise Mappls. Mac
+recap messages do not contain the original phone GPS. Explicitly mapped payees
+and entries already covered by the commuting rule are not in this queue.
+
+A batch approval validates the saved proposal versions before writing. If another
+review changed a selected payee, reopen the summary rather than approving a stale
+card. Each payee save is independent; if a save fails halfway through a batch,
+the result reports successes and failures, and pending payees can be retried.
 
 If `/review` is absent, confirm you installed the bot with the `bot` and
 `applications.commands` scopes, reopen Discord, and check the service log for
@@ -186,17 +193,16 @@ The Discord frontend sends normal questions to Hermes and handles `/review`
 and category confirmation buttons itself; Hermes's journal mount stays read-only.
 
 - Use `/review` to work through pending unknown payees, newest first, or
-  `/review count:10` to review up to 10. Confirming or dismissing advances to the
+  `/review count:10` to review up to 10. Confirming ordismissing advances to the
   next card. Optionally supply an exact payee name to reopen a dismissed review.
 - GPS-tagged examples get nearby Mappls candidates (cached for 24 hours).
   Without GPS, the suggestion uses the payee and transaction context.
-- Decisions selects from a fixed set of category accounts or says unknown.
+- Decisions selects from built-in and confirmed custom category accounts, or says unknown.
   It receives payee, dates, amounts, directions, and nearby place descriptions;
   raw SMS bodies, bank account IDs, UPI references, and exact GPS are omitted.
-- **Confirm category** is the only action that saves a mapping. Changing a
-  category or requesting a new suggestion does not save it. Authorized Discord
-  users can confirm, choose another account, or dismiss the card. Confirmed
-  custom category accounts are included in the presets.
+- Only **Approve N payee mappings** (summary mode) or **Confirm category**
+  (individual mode) saves mappings. Changing a category, including it in a
+  proposal, or requesting a new suggestion does not save a financial mapping.
 - Confirmation backs up the mapping and journal, updates matching unknown
   history, and preserves historical entries absent from the raw log. Existing
   explicit mappings are never overwritten by a stale card.
@@ -300,6 +306,8 @@ finmes/cli.py        recap, backfill, replay, review, apply-review, recategorize
 finmes/categories.py category review exports and backed-up historical rewrites
 finmes/enrichment.py Mappls lookup and direct OpenAI Decisions client
 finmes/reviews.py    persistent review queue, authorization and confirmation
+finmes/bulk_reviews.py batch snapshots, eligibility and guarded approval
+finmes/bulk_discord.py batch summaries and proposal editing
 finmes/discord_bot.py Discord review cards and chat bridge to Hermes
 data/                private journal, mappings, raw log and review state
 .hermes/             agent configuration, skill and private runtime history

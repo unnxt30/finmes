@@ -101,9 +101,11 @@ class Suggestion:
     note: str
 
 
-def decide_category(candidate: dict, places: list[dict], key: str) -> Suggestion:
+def decide_category(candidate: dict, places: list[dict], key: str,
+                    categories=None) -> Suggestion:
     if not key:
         raise EnrichmentError("OPENAI_API_KEY is missing; manual category selection is available")
+    choices = dict(CATEGORIES if categories is None else categories)
     # No SMS body, bank account, UPI reference, or exact GPS is sent to OpenAI.
     evidence = {"payee": candidate["payee"], "examples": [
         {k: row[k] for k in ("date", "amount", "time", "direction") if k in row}
@@ -121,7 +123,7 @@ def decide_category(candidate: dict, places: list[dict], key: str) -> Suggestion
                 "Use unknown if the merchant or purpose is ambiguous. "
                 "Respect debit versus credit and distinguish transfers from consumption."
             ),
-            "choices": [{"value": k, "description": v} for k, v in CATEGORIES] + [
+            "choices": [{"value": k, "description": v} for k, v in choices.items()] + [
                 {"value": "unknown", "description": "Insufficient or ambiguous evidence"}],
         }],
     }
@@ -135,7 +137,7 @@ def decide_category(candidate: dict, places: list[dict], key: str) -> Suggestion
             return Suggestion(None, None, "Decisions declined to classify this payee.")
         choice, confidence = answer["choice"], answer["confidence"]
         if (answer["type"] != "choice" or not isinstance(choice, str)
-                or choice not in {*CHOICES, "unknown"} or isinstance(confidence, bool)
+                or choice not in {*choices, "unknown"} or isinstance(confidence, bool)
                 or not isinstance(confidence, (float, int))
                 or not math.isfinite(confidence) or not 0 <= confidence <= 1):
             raise ValueError
