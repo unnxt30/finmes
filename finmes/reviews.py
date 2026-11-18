@@ -21,17 +21,23 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def collect_unknowns(journal_dir: Path, mappings_path: Path) -> list[dict]:
-    """Read actual unknown postings, including history absent from the raw log."""
+def payment_amount(amount: str) -> tuple[str, Decimal | None]:
+    number = re.search(r"-?\d[\d,]*(?:\.\d+)?", amount)
+    if not number:
+        return "", None
+    currency = "INR" if "₹" in amount else re.sub(r"[-\d,.\s]", "", amount) or "INR"
+    return currency, abs(Decimal(number[0].replace(",", "")))
+
+
+def unknown_payments(journal_dir: Path, mappings_path: Path):
+    """Yield individual uncategorized payments with stable journal keys."""
     mappings = Mappings.load(mappings_path)
-    groups = {}
     for _, lines, header in _entries(journal_dir):
         unknown = _unknown(lines)
         key = KEY_RE.search(header[3])
         payee = header[2]
         if not unknown or not key or payee in mappings.payees:
             continue
-        row = groups.setdefault(payee, {"payee": payee, "keys": [], "examples": [], "count": 0, "totals": {}, "debit_inr": "0"})
         amount = next((m[1].strip() for line in lines[1:]
                        if (m := re.match(r"^\s+\S+\s{2,}(.+)$", line))), "")
         example = {"date": header[1], "amount": amount,
@@ -42,14 +48,20 @@ def collect_unknowns(journal_dir: Path, mappings_path: Path) -> list[dict]:
         lon = re.search(r"\blon:([^\s,]+)", header[3])
         if lat and lon and coordinates({"lat": lat[1], "lon": lon[1]}):
             example["location"] = {"lat": lat[1], "lon": lon[1]}
-        number = re.search(r"-?\d[\d,]*(?:\.\d+)?", amount)
-        if number:
-            value = abs(Decimal(number[0].replace(",", "")))
-            currency = "INR" if "₹" in amount else re.sub(r"[-\d,.\s]", "", amount) or "INR"
+        yield payee, example
+
+
+def collect_unknowns(journal_dir: Path, mappings_path: Path) -> list[dict]:
+    """Read actual unknown postings, including history absent from the raw log."""
+    groups = {}
+    for payee, example in unknown_payments(journal_dir, mappings_path):
+        row = groups.setdefault(payee, {"payee": payee, "keys": [], "examples": [], "count": 0, "totals": {}, "debit_inr": "0"})
+        currency, value = payment_amount(example["amount"])
+        if value is not None:
             row["totals"][currency] = str(Decimal(row["totals"].get(currency, "0")) + value)
-            if currency == "INR" and unknown[2] == "debit":
+            if currency == "INR" and example["direction"] == "debit":
                 row["debit_inr"] = str(Decimal(row["debit_inr"]) + value)
-        row["keys"].append(key[1])
+        row["keys"].append(example["key"])
         row["examples"].append(example)
         row["count"] += 1
     for row in groups.values():
@@ -94,6 +106,8 @@ class ReviewEngine:
                 );
             """)
         self.db_path.chmod(0o600)
+        from finmes.payment_reviews import PaymentReviews
+        self.payments = PaymentReviews(self)
 
     @contextmanager
     def db(self):
@@ -113,9 +127,9 @@ class ReviewEngine:
             raise PermissionError("You are not authorized to review categories.")
 
     def scan(self) -> int:
-        candidates = collect_unknowns(self.journal_dir, self.mappings_path)
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
+            candidates = collect_unknowns(self.journal_dir, self.mappings_path)
             initialized = db.execute("SELECT 1 FROM settings WHERE key='initialized'").fetchone()
             for candidate in candidates:
                 fresh = False
@@ -127,7 +141,8 @@ class ReviewEngine:
                     (id,payee,candidate,created_at,updated_at) VALUES (?,?,?,?,?)""",
                     (uuid.uuid4().hex, candidate["payee"], json.dumps(candidate), now, now))
                 encoded = json.dumps(candidate)
-                db.execute("UPDATE reviews SET candidate=?,updated_at=? WHERE payee=? AND state='waiting' AND candidate<>?",
+                db.execute("""UPDATE reviews SET candidate=?,updated_at=?,state='waiting'
+                           WHERE payee=? AND (state='resolved' OR (state='waiting' AND candidate<>?))""",
                            (encoded, now, candidate["payee"], encoded))
                 if initialized and fresh:
                     db.execute("""UPDATE reviews SET auto_notify=1 WHERE payee=?
@@ -254,7 +269,7 @@ class ReviewEngine:
                 notes.append("No GPS for these examples; using payee and transaction context.")
             try:
                 choices = dict(CATEGORIES)
-                for category in sorted(set(Mappings.load(self.mappings_path).payees.values())):
+                for category in sorted(self.confirmed_categories()):
                     if ACCOUNT_RE.fullmatch(category) and len(category) <= 100:
                         choices.setdefault(category, f"User category: {category}")
                 suggestion = decide_category(row["candidate"], places, self.openai_key, list(choices.items()))
@@ -320,3 +335,9 @@ class ReviewEngine:
     def mark_notified(self, review_id: str):
         with self.db() as db:
             db.execute("UPDATE reviews SET notified_at=? WHERE id=?", (_now(), review_id))
+
+    def confirmed_categories(self) -> set[str]:
+        categories = set(Mappings.load(self.mappings_path).payees.values())
+        with self.db() as db:
+            categories.update(row[0] for row in db.execute("SELECT DISTINCT category FROM confirmed_payments"))
+        return categories

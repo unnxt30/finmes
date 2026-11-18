@@ -14,7 +14,6 @@ import discord
 from discord import app_commands
 
 from finmes.enrichment import CATEGORIES
-from finmes.journal import Mappings
 from finmes.reviews import ReviewEngine
 
 log = logging.getLogger(__name__)
@@ -39,7 +38,7 @@ def review_embed(row: dict) -> discord.Embed:
             lines.append(discord.utils.escape_markdown(p["name"]) + suffix)
         embed.add_field(name="Nearby possibilities — unverified", value="\n".join(lines)[:1024], inline=False)
     embed.add_field(name="Suggestion context", value=row["note"][:1024] or "Awaiting suggestion.", inline=False)
-    embed.set_footer(text="Confirm saves this payee mapping for future transactions and updates matching unknown history.")
+    embed.set_footer(text="Remember this payee applies to its unknown history and future payments. Confirm this payment lets you pick one.")
     return embed
 
 
@@ -79,7 +78,7 @@ def category_choices(engine: ReviewEngine) -> list[tuple[str, str]]:
     """Confirmed mapping accounts become presets; unsaved selections do not."""
     choices = list(CATEGORIES)
     known = {category for category, _ in choices}
-    custom = set(Mappings.load(engine.mappings_path).payees.values()) - known
+    custom = engine.confirmed_categories() - known
     choices.extend((category, category) for category in sorted(custom))
     return choices
 
@@ -124,13 +123,15 @@ class ReviewView(discord.ui.View):
                 button.callback = page_callback
                 self.add_item(button)
         for name, label, callback, style in (
-            ("confirm", "Confirm category", self.on_confirm, discord.ButtonStyle.success),
+            ("confirm", "Remember this payee", self.on_confirm, discord.ButtonStyle.success),
+            ("payment", "Confirm this payment", self.on_payment, discord.ButtonStyle.secondary),
             ("custom", "Other category", self.on_custom, discord.ButtonStyle.secondary),
             ("refresh", "Refresh suggestion", self.on_refresh, discord.ButtonStyle.secondary),
             ("skip", "Dismiss", self.on_skip, discord.ButtonStyle.secondary),
         ):
             button = discord.ui.Button(label=label, custom_id=f"review:{name}:{prefix}", style=style,
-                                       row=2 if self.category_pages > 1 else 1, disabled=name == "confirm" and not row["category"])
+                                       row=2 if self.category_pages > 1 else 1,
+                                       disabled=name in {"confirm", "payment"} and not row["category"])
             button.callback = callback
             self.add_item(button)
 
@@ -210,6 +211,19 @@ class ReviewView(discord.ui.View):
             row = self.engine.get(self.review_id)
             await self.finish_card(interaction,
                 f"Saved **{discord.utils.escape_markdown(row['payee'])} → {row['category']}**. Updated {changed} unknown transaction(s).")
+        except (ValueError, PermissionError) as exc:
+            await interaction_error(interaction, exc)
+
+    async def on_payment(self, interaction: discord.Interaction):
+        from finmes.payment_discord import PaymentPicker
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        store = self.engine.payments
+        try:
+            payee, category, payments = await asyncio.to_thread(
+                store.choices, self.review_id, self.version, interaction.user.id)
+            picker = PaymentPicker(store, self.review_id, self.version, interaction.user.id,
+                                   payee, category, payments)
+            await interaction.followup.send(embed=picker.embed(), view=picker, ephemeral=True)
         except (ValueError, PermissionError) as exc:
             await interaction_error(interaction, exc)
 
@@ -298,7 +312,10 @@ class FinanceBot(discord.Client):
             self.add_view(ReviewView(self.engine, row, batch_id, page))
 
     async def setup_hook(self):
+        from finmes.payment_discord import PaymentMatches
         await asyncio.to_thread(self.engine.scan)
+        for batch in await asyncio.to_thread(self.engine.payments.open_batches):
+            self.add_view(PaymentMatches(self.engine.payments, batch))
         for row in await asyncio.to_thread(self.engine.pending):
             self.restore_review_views(row)
         for batch_id in await asyncio.to_thread(self.engine.active_batches):

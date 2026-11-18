@@ -202,13 +202,44 @@ def _recategorize_locked(journal_dir: Path, mappings: Mappings, times: dict[str,
         if changed_file:
             updates[path] = "\n\n".join(blocks)
     if apply and updates:
-        backup_dir = Path(journal_dir).parent / "backups" / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        backup_dir.mkdir(parents=True)
-        for path in updates:
-            shutil.copy2(path, backup_dir / path.name)
-        for path, content in updates.items():
-            _atomic_write(path, content)
+        _save_journal_updates(journal_dir, updates)
     return changed_entries, tagged_entries
+
+
+def categorize_payments(journal_dir: Path, payments: dict[str, str], category: str) -> set[str]:
+    """Apply a category to selected unknown journal keys, validated against their payees."""
+    if not ACCOUNT_RE.fullmatch(category) or category in {"expenses:unknown", "income:unknown"}:
+        raise ValueError("Choose a category before confirming these payments.")
+    changed = set()
+    with journal_lock(journal_dir):
+        updates = {}
+        for path in sorted(journal_dir.glob("[0-9][0-9][0-9][0-9].journal")):
+            blocks = path.read_text().split("\n\n")
+            for index, block in enumerate(blocks):
+                lines = block.splitlines()
+                if len(lines) != 3 or not (header := HEADER_RE.match(lines[0])):
+                    continue
+                key = KEY_RE.search(header[3])
+                if not key or payments.get(key[1]) != header[2] or key[1] in changed:
+                    continue
+                if unknown := _unknown(lines):
+                    line, match, _, _ = unknown
+                    lines[line] = match[1] + category + (match[3] or "")
+                    blocks[index] = "\n".join(lines) + ("\n" if block.endswith("\n") else "")
+                    changed.add(key[1])
+                    updates[path] = blocks
+        if updates:
+            _save_journal_updates(journal_dir, {path: "\n\n".join(blocks) for path, blocks in updates.items()})
+    return changed
+
+
+def _save_journal_updates(journal_dir, updates):
+    backup_dir = Path(journal_dir).parent / "backups" / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    backup_dir.mkdir(parents=True)
+    for path in updates:
+        shutil.copy2(path, backup_dir / path.name)
+    for path, content in updates.items():
+        _atomic_write(path, content)
 
 
 def _atomic_write(path: Path, text: str) -> None:

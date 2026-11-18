@@ -200,9 +200,18 @@ and category confirmation buttons itself; Hermes's journal mount stays read-only
 - Decisions selects from built-in and confirmed custom category accounts, or says unknown.
   It receives the payee name, amounts and debit or credit directions for up to three
   payments, and available nearby place descriptions. Transaction dates and times stay local to Finmes.
-- Only **Approve N payee mappings** (summary mode) or **Confirm category**
-  (individual mode) saves mappings. Changing a category, including it in a
+- **Approve N payee mappings** (summary mode) and **Remember this payee**
+  (individual mode) save payee mappings. Changing a category, including it in a
   proposal, or requesting a new suggestion does not save a financial mapping.
+- Use **Confirm this payment** on an individual review or in a summary's payee
+  editor. Pick a dated payment and save it to apply the category to that one
+  journal entry. Then Finmes checks up to 30 uncategorized payments across
+  payees, prioritizing nearby records and similar amounts in the same currency
+  and direction. Decisions compares them with confirmed examples using payee
+  names, exact amounts, payment directions, and a coarse nearby indicator.
+  The Discord card shows up to 10 matches at an estimated 85% probability or
+  higher. Select the entries you want, then click **Approve N payments** to
+  categorize them. Run `/review` for a fresh summary after a payment save.
 - Confirmation backs up the mapping and journal, updates matching unknown
   history, and preserves historical entries absent from the raw log. Existing
   explicit mappings are never overwritten by a stale card.
