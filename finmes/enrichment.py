@@ -106,11 +106,9 @@ def decide_category(candidate: dict, places: list[dict], key: str,
     if not key:
         raise EnrichmentError("OPENAI_API_KEY is missing; manual category selection is available")
     choices = dict(CATEGORIES if categories is None else categories)
-    # No SMS body, bank account, UPI reference, or exact GPS is sent to OpenAI.
-    evidence = {"payee": candidate["payee"], "examples": [
-        {k: row[k] for k in ("date", "amount", "time", "direction") if k in row}
-        for row in candidate["examples"][:3]
-    ], "nearby_places": places}
+    directions = sorted({row["direction"] for row in candidate["examples"][:3]
+                         if row.get("direction") in ("debit", "credit")})
+    evidence = {"payee": candidate["payee"], "directions": directions, "nearby_places": places}
     payload = {
         "model": "gpt-6-luna", "input": json.dumps(evidence, ensure_ascii=False),
         "questions": [{
