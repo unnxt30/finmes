@@ -212,6 +212,10 @@ and category confirmation buttons itself; Hermes's journal mount stays read-only
   The Discord card shows up to 10 matches at an estimated 85% probability or
   higher. Select the entries you want, then click **Approve N payments** to
   categorize them. Run `/review` for a fresh summary after a payment save.
+- Use `/matches` to generate a review card from categories you already
+  confirmed. Use `/matches category:expenses:transport:commuting` to focus on
+  one category. The scan checks up to 30 candidates per category, currency and
+  direction, and shows up to 10 unambiguous suggestions.
 - Confirmation backs up the mapping and journal, updates matching unknown
   history, and preserves historical entries absent from the raw log. Existing
   explicit mappings are never overwritten by a stale card.

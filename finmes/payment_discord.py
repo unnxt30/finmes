@@ -109,13 +109,18 @@ class PaymentPicker(PrivatePaymentView):
 
 
 def matches_embed(batch):
-    category = discord.utils.escape_markdown(batch["category"])
+    description = f"{batch['checked']} uncategorized payments checked"
+    if batch["category"]:
+        description = f"**{discord.utils.escape_markdown(batch['category'])}** · {description}"
     embed = discord.Embed(title="Suggested historical matches",
-                          description=f"**{category}** · {batch['checked']} uncategorized payments checked")
+                          description=description)
     for match in batch["matches"]:
         status = "Included" if match["included"] else "Excluded"
+        details = f"{payment_label(match)} · AI {match['probability']:.0%} · {status}"
+        if not batch["category"]:
+            details += f"\n{discord.utils.escape_markdown(match['category'])}"
         embed.add_field(name=discord.utils.escape_markdown(match["payee"])[:256],
-                        value=f"{payment_label(match)} · AI {match['probability']:.0%} · {status}", inline=False)
+                        value=details[:1024], inline=False)
     return embed
 
 
@@ -126,7 +131,8 @@ class PaymentMatches(PrivatePaymentView):
         prefix = f"payment-match:{self.batch_id}:{self.version}"
         select = discord.ui.Select(placeholder="Choose which matches to include", custom_id=f"{prefix}:select",
                                    min_values=0, max_values=len(batch["matches"]), row=0, options=[
-            discord.SelectOption(label=f"{match['payee']} · {match['amount']}"[:100], description=match["date"],
+            discord.SelectOption(label=f"{match['payee']} · {match['amount']}"[:100],
+                                 description=f"{match['date']} · {match.get('category', batch['category'])}"[:100],
                                  value=match["key"], default=match["included"])
             for match in batch["matches"]])
         select.callback = self.select_matches

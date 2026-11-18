@@ -206,10 +206,11 @@ def _recategorize_locked(journal_dir: Path, mappings: Mappings, times: dict[str,
     return changed_entries, tagged_entries
 
 
-def categorize_payments(journal_dir: Path, payments: dict[str, str], category: str) -> set[str]:
+def categorize_payments(journal_dir: Path, payments: dict[str, tuple[str, str]]) -> set[str]:
     """Apply a category to selected unknown journal keys, validated against their payees."""
-    if not ACCOUNT_RE.fullmatch(category) or category in {"expenses:unknown", "income:unknown"}:
-        raise ValueError("Choose a category before confirming these payments.")
+    for _, category in payments.values():
+        if not ACCOUNT_RE.fullmatch(category) or category in {"expenses:unknown", "income:unknown"}:
+            raise ValueError("Choose a category before confirming these payments.")
     changed = set()
     with journal_lock(journal_dir):
         updates = {}
@@ -220,11 +221,12 @@ def categorize_payments(journal_dir: Path, payments: dict[str, str], category: s
                 if len(lines) != 3 or not (header := HEADER_RE.match(lines[0])):
                     continue
                 key = KEY_RE.search(header[3])
-                if not key or payments.get(key[1]) != header[2] or key[1] in changed:
+                target = payments.get(key[1]) if key else None
+                if not target or target[0] != header[2] or key[1] in changed:
                     continue
                 if unknown := _unknown(lines):
                     line, match, _, _ = unknown
-                    lines[line] = match[1] + category + (match[3] or "")
+                    lines[line] = match[1] + target[1] + (match[3] or "")
                     blocks[index] = "\n".join(lines) + ("\n" if block.endswith("\n") else "")
                     changed.add(key[1])
                     updates[path] = blocks

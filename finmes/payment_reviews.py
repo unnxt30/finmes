@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 from finmes.categories import categorize_payments
-from finmes.enrichment import coordinates, decide_payment_matches
+from finmes.enrichment import EnrichmentError, coordinates, decide_payment_matches
 from finmes.reviews import _now, collect_unknowns, payment_amount, unknown_payments
+
+log = logging.getLogger(__name__)
 
 MAX_CANDIDATES = 30
 MAX_MATCHES = 10
@@ -69,18 +74,18 @@ class PaymentReviews:
             db.execute("BEGIN IMMEDIATE")
             row = self._selected_review(db, review_id, version)
             payment = next((p for p in self._unknowns() if p["key"] == key and p["payee"] == row["payee"]), None)
-            if not payment or not self._apply(db, [payment], row["category"]):
+            if not payment or not self._apply(db, [dict(payment, category=row["category"])]):
                 raise ValueError("This payment has already changed. Run /review to see the current payments.")
             return payment, row["category"]
 
-    def _apply(self, db, payments, category):
+    def _apply(self, db, payments):
         changed = categorize_payments(self.engine.journal_dir,
-                                      {p["key"]: p["payee"] for p in payments}, category)
+                                      {p["key"]: (p["payee"], p["category"]) for p in payments})
         if not changed:
             return 0
         confirmed_at = _now()
         db.executemany("INSERT OR REPLACE INTO confirmed_payments VALUES (?,?,?,?)", (
-            (p["key"], category, json.dumps(payment_evidence(p) | {
+            (p["key"], p["category"], json.dumps(payment_evidence(p) | {
                 "key": p["key"], "location": p.get("location"),
             }), confirmed_at) for p in payments if p["key"] in changed
         ))
@@ -99,63 +104,113 @@ class PaymentReviews:
                         _now(), payee))
         return len(changed)
 
+    def _confirmed_examples(self, category=None):
+        with self.engine.db() as db:
+            where = " AND category=?" if category is not None else ""
+            args = (category,) if category is not None else ()
+            for row in db.execute("SELECT category,payment FROM confirmed_payments WHERE 1=1"
+                                  + where + " ORDER BY confirmed_at DESC", args):
+                yield row["category"], json.loads(row["payment"])
+            # Prior approvals labelled the payee. Take one payment per currency
+            # and direction from each review to give different payees a voice.
+            for row in db.execute("""SELECT payee,candidate,category FROM reviews
+                WHERE state='approved' AND approved_by IS NOT NULL"""
+                + where + " ORDER BY updated_at DESC", args):
+                seen = set()
+                for payment in json.loads(row["candidate"])["examples"]:
+                    group = payment_amount(payment["amount"])[0], payment["direction"]
+                    if group not in seen:
+                        yield row["category"], dict(payment, payee=row["payee"], confirmed_by_payee=True)
+                        seen.add(group)
+
+    def _score(self, category, examples, payments):
+        amounts = [payment_amount(example["amount"])[1] for example in examples]
+        ranked = []
+        for payment in payments:
+            _, value = payment_amount(payment["amount"])
+            nearby = any(near_example(payment, example) for example in examples)
+            evidence = dict(payment_evidence(payment), near_confirmed_payment=nearby)
+            ranked.append((not nearby, min(abs(value - amount) for amount in amounts), payment, evidence))
+        ranked.sort(key=lambda item: item[:2])
+        shortlist = ranked[:MAX_CANDIDATES]
+        if not shortlist:
+            return [], set()
+        evidence = [dict(payment_evidence(p), confirmation_scope="payee" if p.get("confirmed_by_payee") else "payment")
+                    for p in examples]
+        scores = decide_payment_matches(self.engine.openai_key, category, evidence,
+                                        [entry[3] for entry in shortlist])
+        matches = [dict(shortlist[index][2], category=category, probability=probability, included=True)
+                   for index, probability in scores.items() if probability >= MIN_PROBABILITY]
+        return matches, {entry[2]["key"] for entry in shortlist}
+
+    def _store_matches(self, actor, category, matches, checked):
+        if not matches:
+            return None
+        matches.sort(key=lambda p: p["probability"], reverse=True)
+        batch_id = uuid.uuid4().hex
+        with self.engine.db() as db:
+            db.execute("""INSERT INTO payment_match_reviews (id,actor,category,matches,checked)
+                VALUES (?,?,?,?,?)""", (batch_id, actor, category, json.dumps(matches[:MAX_MATCHES]), checked))
+        return self.get(batch_id, actor)
+
     def suggest(self, actor, seed, category):
         self.engine.authorize(actor)
         currency, amount = payment_amount(seed["amount"])
         if amount is None:
             return None, 0
-        with self.engine.db() as db:
-            examples = [seed]
-            for row in db.execute("""SELECT payment FROM confirmed_payments
-                WHERE category=? AND key<>? ORDER BY confirmed_at DESC LIMIT 20""", (category, seed["key"])):
-                payment = json.loads(row["payment"])
-                if payment["direction"] == seed["direction"] and payment_amount(payment["amount"])[0] == currency:
-                    examples.append(payment)
-                    if len(examples) == 5:
-                        break
-            # Older Discord approvals were payee-wide. Use those as additional
-            # examples when there are few individual confirmations.
-            seen = {example["key"] for example in examples}
-            for row in db.execute("""SELECT payee,candidate FROM reviews
-                WHERE state='approved' AND approved_by IS NOT NULL AND category=?
-                ORDER BY updated_at DESC LIMIT 20""", (category,)):
-                if len(examples) == 5:
-                    break
-                for payment in json.loads(row["candidate"])["examples"]:
-                    if (payment["key"] not in seen and payment["direction"] == seed["direction"]
-                            and payment_amount(payment["amount"])[0] == currency):
-                        examples.append(dict(payment, payee=row["payee"], confirmed_by_payee=True))
-                        seen.add(payment["key"])
-                        break
+        direction = seed["direction"]
+        examples, seen = [seed], {seed["key"]}
+        for _, payment in self._confirmed_examples(category):
+            if len(examples) == 5:
+                break
+            example_currency, value = payment_amount(payment["amount"])
+            if value is not None and example_currency == currency and payment["direction"] == direction and payment["key"] not in seen:
+                examples.append(payment)
+                seen.add(payment["key"])
+        payments = [p for p in self._unknowns() if p["direction"] == direction
+                    and payment_amount(p["amount"])[0] == currency]
+        matches, checked = self._score(category, examples, payments)
+        return self._store_matches(actor, category, matches, len(checked)), len(checked)
 
-        ranked = []
+    def suggest_from_history(self, actor, category=None):
+        """Review a bounded set of older payments using existing approval history."""
+        self.engine.authorize(actor)
+        if not self.engine.openai_key:
+            raise EnrichmentError("OPENAI_API_KEY is missing")
+        payments_by_kind = defaultdict(list)
         for payment in self._unknowns():
-            payment_currency, value = payment_amount(payment["amount"])
-            if payment_currency != currency or value is None or payment["direction"] != seed["direction"]:
-                continue
-            nearby = any(near_example(payment, example) for example in examples)
-            evidence = dict(payment_evidence(payment), near_confirmed_payment=nearby)
-            ranked.append((not nearby, abs(value - amount), payment, evidence))
-        ranked.sort(key=lambda item: item[:2])
-        shortlist = ranked[:MAX_CANDIDATES]
-        if not shortlist:
-            return None, 0
-        evidence = [dict(payment_evidence(p), confirmation_scope="payee" if p.get("confirmed_by_payee") else "payment")
-                    for p in examples]
-        scores = decide_payment_matches(self.engine.openai_key, category, evidence,
-                                        [entry[3] for entry in shortlist])
-        matches = []
-        for index, probability in sorted(scores.items(), key=lambda item: item[1], reverse=True):
-            if probability >= MIN_PROBABILITY:
-                matches.append(dict(shortlist[index][2], probability=probability, included=True))
-        if not matches:
-            return None, len(shortlist)
+            currency, amount = payment_amount(payment["amount"])
+            if amount is not None:
+                payments_by_kind[currency, payment["direction"]].append(payment)
 
-        batch_id = uuid.uuid4().hex
-        with self.engine.db() as db:
-            db.execute("""INSERT INTO payment_match_reviews (id,actor,category,matches,checked)
-                VALUES (?,?,?,?,?)""", (batch_id, actor, category, json.dumps(matches[:MAX_MATCHES]), len(shortlist)))
-        return self.get(batch_id, actor), len(shortlist)
+        groups = defaultdict(dict)
+        for account, payment in self._confirmed_examples(category):
+            currency, amount = payment_amount(payment["amount"])
+            kind = currency, payment["direction"]
+            if amount is not None and kind in payments_by_kind:
+                examples = groups[account, kind]
+                if len(examples) < 5:
+                    examples.setdefault(payment["key"], payment)
+
+        by_key = defaultdict(list)
+        checked, failures = set(), 0
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            jobs = [pool.submit(self._score, account, list(examples.values()), payments_by_kind[kind])
+                    for (account, kind), examples in groups.items()]
+            for job in jobs:
+                try:
+                    matches, keys = job.result()
+                except EnrichmentError as exc:
+                    log.warning("Historical Decisions request failed: %s", exc)
+                    failures += 1
+                    continue
+                checked.update(keys)
+                for match in matches:
+                    by_key[match["key"]].append(match)
+
+        # If two categories are plausible, leave the payment for manual review.
+        matches = [options[0] for options in by_key.values() if len(options) == 1]
+        return self._store_matches(actor, category or "", matches, len(checked)), len(checked), failures
 
     def _batch(self, db, batch_id, actor, version=None):
         self.engine.authorize(actor)
@@ -192,7 +247,8 @@ class PaymentReviews:
         with self.engine.db() as db:
             db.execute("BEGIN IMMEDIATE")
             batch = self._batch(db, batch_id, actor, version)
-            selected = [match for match in batch["matches"] if match["included"]]
-            changed = self._apply(db, selected, batch["category"]) if approve and selected else 0
+            selected = [dict(match, category=match.get("category", batch["category"]))
+                        for match in batch["matches"] if match["included"]]
+            changed = self._apply(db, selected) if approve and selected else 0
             db.execute("UPDATE payment_match_reviews SET state='closed' WHERE id=?", (batch_id,))
             return changed, len(selected) - changed

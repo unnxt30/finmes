@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 import discord
 from discord import app_commands
 
-from finmes.enrichment import CATEGORIES
+from finmes.enrichment import CATEGORIES, EnrichmentError
 from finmes.reviews import ReviewEngine
 
 log = logging.getLogger(__name__)
@@ -297,6 +297,31 @@ class FinanceBot(discord.Client):
                 batch_id = await asyncio.to_thread(engine.start_batch, interaction.user.id, row, count, single_payee=bool(payee))
                 view = ReviewView(engine, row, batch_id)
                 await send_private_review(interaction, embed=view.card_embed(row), view=view)
+            except (ValueError, PermissionError) as exc:
+                await interaction_error(interaction, exc)
+
+        @self.tree.command(name="matches", description="Find historical matches based on categories you already approved")
+        @app_commands.describe(category="Optional category account, such as expenses:transport:commuting")
+        async def matches(interaction: discord.Interaction, category: str | None = None):
+            from finmes.payment_discord import PaymentMatches, matches_embed
+            try:
+                engine.authorize(interaction.user.id)
+                await interaction.response.defer(ephemeral=True)
+                batch, checked, failures = await asyncio.to_thread(
+                    engine.payments.suggest_from_history, interaction.user.id, category)
+                if failures:
+                    await interaction.followup.send(
+                        f"Decisions couldn’t complete {failures} category check(s). You can retry with /matches.",
+                        ephemeral=True)
+                if batch is None:
+                    message = (f"Checked {checked} payments. No matches passed review."
+                               if checked else "There were no eligible payments checked against prior approvals.")
+                    await interaction.followup.send(message, ephemeral=True)
+                    return
+                await send_private_review(interaction, embed=matches_embed(batch),
+                                          view=PaymentMatches(engine.payments, batch))
+            except EnrichmentError as exc:
+                await interaction_error(interaction, ValueError(f"Decisions is unavailable ({exc})."))
             except (ValueError, PermissionError) as exc:
                 await interaction_error(interaction, exc)
 

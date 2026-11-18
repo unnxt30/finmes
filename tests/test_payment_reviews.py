@@ -111,3 +111,34 @@ def test_bulk_item_can_open_private_single_payment_review(engine, monkeypatch):
             assert db.execute("SELECT key FROM confirmed_payments").fetchall()[0][0] == "example"
 
     asyncio.run(run())
+
+
+def test_history_scan_uses_legacy_approvals_and_omits_conflicting_matches(engine, monkeypatch):
+    storage = engine.journal_dir / "2026.journal"
+    with storage.open("a") as file:
+        file.write("\n2026-10-19 MARKET  ; key:market\n    expenses:unknown  ₹358.00\n    assets:bank:icici\n")
+        file.write("\n2026-10-19 FOOD OUTLET  ; key:restaurant\n    expenses:unknown  ₹359.00\n    assets:bank:icici\n")
+    engine.scan()
+    for payee, category in (("AUTO TRAVEL", COMMUTING), ("GROCERY", "expenses:groceries")):
+        row = engine.next(payee=payee)
+        row = engine.choose(row["id"], row["version"], 10, category)
+        engine.confirm(row["id"], row["version"], 10)
+
+    def decide(key, category, examples, candidates):
+        assert examples and examples[0]["confirmation_scope"] == "payee"
+        hits = {"FOOD OUTLET", "LOCAL CAB" if category == COMMUTING else "MARKET"}
+        return {i: .95 for i, p in enumerate(candidates) if p["payee"] in hits}
+
+    monkeypatch.setattr("finmes.payment_reviews.decide_payment_matches", decide)
+    before = storage.read_text()
+    with engine.db() as db:
+        assert not db.execute("SELECT * FROM confirmed_payments").fetchall()
+    batch, checked, failures = engine.payments.suggest_from_history(10)
+    assert checked == 5 and failures == 0 and storage.read_text() == before
+    assert {match["payee"]: match["category"] for match in batch["matches"]} == {
+        "LOCAL CAB": COMMUTING, "MARKET": "expenses:groceries",
+    }
+    assert engine.payments.finish(batch["id"], 10, batch["version"], approve=True) == (2, 0)
+    assert "expenses:groceries  ₹358.00" in storage.read_text()
+    assert "expenses:unknown  ₹359.00" in storage.read_text()
+    assert f"{COMMUTING}  ₹367.00" in storage.read_text()
