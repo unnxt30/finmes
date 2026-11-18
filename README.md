@@ -198,8 +198,8 @@ and category confirmation buttons itself; Hermes's journal mount stays read-only
 - GPS-tagged examples get nearby Mappls candidates (cached for 24 hours).
   Without GPS, the suggestion uses the payee and transaction context.
 - Decisions selects from built-in and confirmed custom category accounts, or says unknown.
-  Its evidence consists of the payee name, debit or credit directions, and nearby
-  place descriptions when available. Amounts and transaction timing stay local to Finmes.
+  It receives the payee name, amounts and debit or credit directions for up to three
+  payments, and available nearby place descriptions. Transaction dates and times stay local to Finmes.
 - Only **Approve N payee mappings** (summary mode) or **Confirm category**
   (individual mode) saves mappings. Changing a category, including it in a
   proposal, or requesting a new suggestion does not save a financial mapping.

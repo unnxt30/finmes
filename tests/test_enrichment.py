@@ -11,13 +11,13 @@ def test_decisions_request_minimizes_data_and_validates_category(monkeypatch):
         captured.append(req)
         return {"answers": [{"type": "choice", "name": "category", "choice": "expenses:groceries", "confidence": .8}]}
     monkeypatch.setattr(api, "_json_request", fake)
-    result = api.decide_category({"payee": "Shop", "examples": [{"date": "2026-10-18", "amount": "₹500.00", "time": "09:30",
+    result = api.decide_category({"payee": "Shop", "examples": [{"date": "2026-10-18", "amount": "₹361.00", "time": "09:30",
         "direction": "debit", "raw": "SECRET SMS", "key": "UPI-SECRET", "location": {"lat": 28.6, "lon": 77.2}}]}, [], "test-key")
     assert result.category == "expenses:groceries"
     body = json.loads(captured[0].data)
     assert body["model"] == "gpt-6-luna"
     assert captured[0].full_url == "https://api.openai.com/v1/decisions"
-    assert json.loads(body["input"]) == {"payee": "Shop", "directions": ["debit"], "nearby_places": []}
+    assert json.loads(body["input"]) == {"payee": "Shop", "examples": [{"amount": "₹361.00", "direction": "debit"}], "nearby_places": []}
     assert body["questions"][0]["type"] == "choice"
 
 
